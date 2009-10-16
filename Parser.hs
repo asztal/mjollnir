@@ -16,29 +16,29 @@ module Parser
 -- The "<|>" from Applicative is preferential because it has a better precedence
 -- level (3) and can thus be mixed with <$>, <*>, <$ and <* with fewer parentheses.
 -- TODO: does Parsec 3 define these better?
-import Text.ParserCombinators.Parsec hiding ((<|>), (<?>), many, optional)
-import qualified Text.ParserCombinators.Parsec as T
+import Text.Parsec hiding ((<|>), (<?>), many, optional)
+import Text.Parsec.String (Parser)
+import qualified Text.Parsec as T
 import qualified Text.ParserCombinators.Parsec.Token as T
 import qualified Text.ParserCombinators.Parsec.Language as T
 
 import Control.Applicative (Applicative(..), Alternative(..), (<$>), (<$), (<*), (*>), many, liftA2)
-import Control.Monad (MonadPlus(..), ap, join, replicateM)
+import Control.Monad (replicateM)
 
 import Numeric (readHex)
 import Data.Char (chr)
 import Data.Maybe (fromMaybe)
-import Data.List ((\\), isPrefixOf, isInfixOf)
+import Data.List (isPrefixOf, isInfixOf)
 
 import Prelude hiding (init)
 
 import AST
 import Language
+import Located
 
 -- Redefine <?> with a higher precedence level so that it plays nicely with $.
 -- It has a higher precedence level than >> too, which is also useful.
 infix 2 <?>
-
-(<?>) :: GenParser t s a -> String -> GenParser t s a
 x <?> y = x T.<?> y
 
 -- Eventually this may need a StateT transformer.
@@ -47,6 +47,15 @@ type P a = Parser a
 -- I chose to use the icelandic grammar names contained in the Forritunarmálið
 -- Fjölnir Notendahandbók, as a way of making it easier to cross-reference them
 -- with the manual.
+
+loc :: P a -> P (Located a)
+loc x = do
+    pos <- getPosition
+    r <- x
+    pos' <- getPosition
+    return $ L (mkLoc pos `srcSpan` mkLoc pos') r
+    where
+        mkLoc pos = srcLoc (sourceName pos) (sourceLine pos) (sourceColumn pos)
 
 -- | A character literal, parsing hexadecimal character literals and escaped characters.
 staffasti :: P Char
@@ -129,51 +138,57 @@ aðgerð = lexeme $ try $ do
         p1 = many1 aðgerðarstafur
         p2 = char '\\' *> (many1 (nafnstafur <|> aðgerðarstafur <|> tölustafur) <?> "rest of named operator")
 
--- TODO: Rework/remove the try here so that it gives better error messages
 -- TODO: Figure out exactly what the different module declarations mean, to give
 --       the parsers proper labels.
 -- | A program is a set of module declarations.
 forrit :: P Program
-forrit = (namedEquation <|> stmt) `endBy` semi where
+forrit = loc (namedEquation <|> stmt) `endBy` semi where
     -- TODO: Figure out what the semantics of these actually are, and if they need different
     -- source tree representations (nafn/strengur).
     -- XXX Yes, they do.
     stmt = do
-        name <- strengur
+        name <- loc strengur
         equation name <|> inequality name            
 
-    namedEquation = ModuleAssign <$> nafn <*> (reserved "=" *> eining) <?> "module declaration"
-    equation name = ModuleAssign <$> pure name <*> (reserved "=" *> eining) <?> "module declaration"
-    inequality name = ModuleFrom <$> pure name <*> (symbol "<" *> nafn) <*> eining <?> "entry point declaration"
+    namedEquation = ModuleAssign <$> loc nafn <*> (reserved "=" *> loc eining) <?> "module declaration"
+    equation name = ModuleAssign <$> pure name <*> (reserved "=" *> loc eining) <?> "module declaration"
+    inequality name = ModuleFrom <$> pure name <*> (symbol "<" *> loc nafn) <*> loc eining <?> "entry point declaration"
 
 -- | A module
 eining :: P ModuleDecl
 eining = do
     h <- module'
-    t <- many (liftA2 (,) (lexeme (oneOf "*:+&")) module')
-    return $ fold h t
+    t <- many $ (,) <$> modOp <*> module'
+    return $ unLoc $ fold h t
 
     where
+        modOp = lexeme $ loc $ (:[]) <$> oneOf "*:+&"
+
         fold m [] = m
-        fold m ((op,m'):rest) = fold (CombinedModule m [op] m') rest
+        fold m ((op, m'):rest) =
+            let left = combineLoc m m' $ CombinedModule m op m'
+            in fold left rest
         
         -- XXX Default compiler does not accept multiple consecutive module operators
         -- without spaces.
-        module' = (symbol "!" *> fmap RecursiveModule module') <|> modPrim
-        modPrim =  NamedModule <$> strengur
-               <|> NamedModule <$> nafn
-               <|> brackets eining
-               <|> ModuleDecl <$> braces (many vörpun)
+        module' =
+            loc (symbol "!" *> fmap RecursiveModule module')
+            <|> modPrim
+
+        modPrim =  loc (NamedModule <$> loc strengur)
+               <|> loc (NamedModule <$> loc nafn)
+               <|> loc (brackets eining)
+               <|> loc (ModuleDecl <$> loc (braces (many vörpun)))
 
 -- | An entity within a module map.
-vörpun :: P (Name, ExportDecl)
+vörpun :: P (Located Name, ExportDecl)
 vörpun = do
-    name <- nafn <|> aðgerð
+    name <- loc nafn <|> loc aðgerð
     symbol "->"
-    value <- val name <?> "value of " ++ showIdent name
+    value <- val name <?> "value of " ++ showIdent (unLoc name)
     return (name, value)
-    where val name =  ExportFunDecl <$> stefskilgreining name
-                  <|> ExportAgainDecl <$> (nafn <|> aðgerð)
+    where val name =  ExportFunDecl <$> loc (stefskilgreining (unLoc name))
+                  <|> ExportAgainDecl <$> loc (nafn <|> aðgerð)
                   <|> ExportVarDecl <$ reserved "breyta"
 
 -- | A subroutine entry in a module.
@@ -181,43 +196,47 @@ stefskilgreining :: Name -> P FunctionDecl
 stefskilgreining name = do
     reserved "stef"
     (inout, in') <- brackets formals <?> "\"(\" after \"stef\""
-    vars <- many ((ImportVarDecl <$> innflutt) <|> (LocalVarDecl <$> staðvær))
+    vars <- many var
     body <- stofns segðaruna
     return $ FunctionDecl inout in' vars body
     <?> "function declaration"
     where
+        var =   ImportVarDecl <$> innflutt
+            <|> LocalVarDecl <$> staðvær
         formals = do
-            inout <- sepBy nafn comma <?> "inout parameter declarations for " ++ showIdent name
+            inout <- loc nafn `sepBy` comma <?> "inout parameter declarations for " ++ showIdent name
             semi <?> "\";\" between inout and in parameter declarations for " ++ showIdent name
-            in' <- sepBy nafn comma <?> "inward parameters declarations for " ++ showIdent name
+            in' <- loc nafn `sepBy` comma <?> "inward parameters declarations for " ++ showIdent name
             return (inout, in')
 
-innflutt :: P [Name]
-innflutt = reserved "innflutt" *> (sepBy nafn comma <?> "comma-separated list of imported names")
+innflutt :: P [Located Name]
+innflutt = do
+    reserved "innflutt"
+    loc nafn `sepBy` comma <?> "comma-separated list of imported names"
 
-staðvær :: P [(Name, Maybe Syntax)]
+staðvær :: P [(Located Name, Maybe (Located Syntax))]
 staðvær = try $ reserved "staðvær" *> (sepBy local comma <?> "comma-separated list of local variables")
     where
         local = do
-            name <- nafn <?> "variable name"
+            name <- loc nafn <?> "variable name"
             -- We use reservedOp something like "staðvær x:=+(;1,2)" should be invalid.
             -- "staðvær x:= +(;1,2)", is, however, valid. Similar reasons exist for
             -- all the other instances of ":=" in the parser.
-            init <- optionMaybe $ reservedOp ":=" *> (segð <?> "initializer expression for " ++ showIdent name)
+            init <- optionMaybe $ reservedOp ":=" *> (loc segð <?> "initializer expression for " ++ showIdent (unLoc name))
             return (name, init)
 
 -- | An expression.
--- This handles logical operators (ekki, og, eða) and all other operators, along with precedence
--- and associativity rules.
--- TODO: make this use OrExpr and AndExpr
+-- This handles logical operators (ekki, og, eða) and all other operators,
+-- along with precedence and associativity rules.
 segð :: P Syntax
 segð = boolOps andExpr (reserved "eða") OrS <?> "expression" where
     andExpr = boolOps notExpr (reserved "og") AndS
-    notExpr = (NotS <$ reserved "ekki" <*> notExpr) <|> opExpr precedences
+    notExpr = (NotS <$ reserved "ekki" <*> loc notExpr) <|> opExpr precedences
 
     -- TODO: foldr1? foldl1 seems best, though. We want to evaluate from left to right.
     -- Parse a list of subs separated by delim, folding them together with cons
-    boolOps sub delim cons = foldl1 cons <$> sub `sepBy1` delim
+    boolOps sub delim cons = unLoc . foldl1 f <$> loc sub `sepBy1` delim
+        where f l r = combineLoc l r (cons l r)
 
     -- An operator of the given precedence level or higher.
     opExpr [] = fylkissegð -- would already do this, but this makes it clearer.
@@ -232,32 +251,20 @@ segð = boolOps andExpr (reserved "eða") OrS <?> "expression" where
         -- This works the same regardless of the associativity of the current level.
         -- E.g. in "1+2 : 3+4" nested would be "1+2" if we are at the level of ":".
         --      in "1*2 + 3*4" nested would be "1*2" if we are at the level of "+"
-        nested <- opTail higherLevels hd
+        nested <- loc $ opTail higherLevels hd
         if isRightAssoc level
             then do
-                rest <- optionMaybe $ (,) <$> oneOfOps level <*> opExpr levels
+                rest <- optionMaybe $ (,) <$> loc (oneOfOps level) <*> loc (opExpr levels)
                 case rest of
-                    Nothing -> return nested
+                    Nothing -> return $ unLoc nested
                     Just (op, expr) -> return $ OperatorS op nested expr
             else do
-                ops <- many $ (,) <$> oneOfOps level <*> opExpr higherLevels
-                return $ foldl (\l (op,r) -> OperatorS op l r) nested ops
+                ops <- many $ (,) <$> loc (oneOfOps level) <*> loc (opExpr higherLevels)
+                return . unLoc $ foldl (\l (op,r) -> combineLoc l r (OperatorS op l r)) nested ops
 
     oneOfOps chars = try (aðgerð >>= checkOp) where 
         checkOp op | take 1 op `isInfixOf` chars = return op
-                   | otherwise = empty
-
-    -- The precedence level of an operator is determined by the first character
-    -- of the operator. This list orders those characters by precedence. Any
-    -- operator starting with a character not found in this list has the lowest
-    -- precedence level of 1.
-    -- This list goes from lowest precedence (1) to highest. 
-    precedences = unassigned : table where
-        unassigned = (alphabet ++ ['0'..'9'] ++ operatorAlphabet) \\ join table
-        -- Precedence table given in the Manual, from 2 to 7. 
-        -- Note that "!?^@" are valid operator characters, but don't have
-        -- an associated precedence level, and thus receive 1.
-        table = [ ":", "&", "|", "<>=", "+-", "*/%" ]              
+                   | otherwise = empty           
 
     -- From what I can see in the Manual, only operators beginning with ':'
     -- are right-assocative.
@@ -273,8 +280,8 @@ segð = boolOps andExpr (reserved "eða") OrS <?> "expression" where
 -- The second skrifastreng should not be followed by a comma, but the Reykjavík compiler
 -- accepts this syntax. The invalid [1,2,3,4,5,6,7,8,] is also accepted by the Reykjavík
 -- compiler, which is why this extra comma is part of segðaruna, not smásegð or stofns.
-segðaruna :: P [Syntax]
-segðaruna = segð `sepEndBy` comma
+segðaruna :: P [Located Syntax]
+segðaruna = loc segð `sepEndBy` comma
 
 -- | This pretty much corresponds to anything you can put after \\haus etc.
 -- I kind of expected to need "try" here. Apparently not though.
@@ -288,7 +295,7 @@ smásegð =  nafnsegð
        <|> stofns (BlockS <$> segðaruna)
        <|> valsegð
        <|> BreakS <$ reserved "út"
-       <|> ReturnS <$ reserved "skila" <*> segð
+       <|> ReturnS <$ reserved "skila" <*> loc segð
        <|> brackets segð
        <|> LiteralS <$> StringLit <$> strengur
        <|> LiteralS <$> tala
@@ -296,30 +303,33 @@ smásegð =  nafnsegð
        <?> "expression"
     where
         operator = do
-            op <- aðgerð
+            op <- loc aðgerð
             -- Minor ambiguity here.
             -- A '(' could start a parenthesised Expr or an OperatorCallExpr.
             -- This requires two tokens of lookahead.
             try (opCall op) <|> opUnary op
-        opUnary op = OperatorUnaryS op <$> smásegð <?> "expression for " ++ showIdent op
+
+        opUnary op = OperatorUnaryS op <$> loc smásegð <?> "expression for " ++ showIdent (unLoc op)
+
         opCall op = brackets $ do
             -- Obviously, you can't use inout parameters with an operator.
-            semi <?> "\";\" before arguments passed to " ++ showIdent op
-            args <- segðaruna <?> "arguments passed to " ++ showIdent op
+            semi <?> "\";\" before arguments passed to " ++ showIdent (unLoc op)
+            args <- segðaruna <?> "arguments passed to " ++ showIdent (unLoc op)
             return $ OperatorCallS op args
+
         funcRef = do
             reserved "stef"
             -- XXX According to the manual, operator names are not allowed here.
             --     However, the Rejkjavík compiler accepts operators too.
-            name <- nafn <|> aðgerð <?> "function or operator name"
-            arity <- brackets $ do
+            name <- loc $ nafn <|> aðgerð <?> "function or operator name"
+            arity <- loc . brackets $ do
                 -- XXX According to the grammar, we should be using `tala' here, but why in
                 -- the fuck would anyone use a floating point or negative number here?
                 -- The Reykjavík compiler parses many things here, but raises an error if it's not
                 -- a fjöldatala.
-                io <- fjöldatala <?> "inout arity of " ++ showIdent name
-                semi <?> "\";\" between number of inout and in parameters for" ++ showIdent name
-                i <- fjöldatala <?> "inward arity of " ++ showIdent name
+                io <- fjöldatala <?> "inout arity of " ++ showIdent (unLoc name)
+                semi <?> "\";\" between number of inout and in parameters for" ++ showIdent (unLoc name)
+                i <- fjöldatala <?> "inward arity of " ++ showIdent (unLoc name)
                 return (io, i)
             return $ FunRefS name arity
 
@@ -328,12 +338,12 @@ lykkjusegð = meðan <|> fyrir <|> (LoopS <$> loopBody "loop body")
     where
         meðan = do
             reserved "meðan"
-            WhileLoopS <$> segð <*> loopBody "body of while loop"
+            WhileLoopS <$> loc segð <*> loopBody "body of while loop"
         fyrir = do
             reserved "fyrir"
             (init, cond, inc) <- brackets $ do
                 init <- segðaruna <?> "initializer expression of for loop"
-                cond <- semi *> (segð <?> "test condition of for loop")
+                cond <- semi *> (loc segð <?> "test condition of for loop")
                 inc <- semi *> (segðaruna <?> "step expression of for loop")
                 return (init, cond, inc)
             body <- loopBody "body of for loop"
@@ -342,40 +352,40 @@ lykkjusegð = meðan <|> fyrir <|> (LoopS <$> loopBody "loop body")
 
 nafnsegð :: P Syntax
 nafnsegð = do
-    name <- nafn
+    name <- loc nafn
     choice [ AssignS name <$> assign name
            , uncurry (FunCallS name) <$> apply name
            , return (VarRefS name) ]
     where
-        assign name = reservedOp ":=" *> (segð <?> "expression to assign to " ++ showIdent name)
+        assign name = reservedOp ":=" *> (loc segð <?> "expression to assign to " ++ showIdent (unLoc name))
         apply name = brackets $ do
-            io <- segðaruna <?> "inout arguments to " ++ showIdent name
-            semi <?> "\";\" between inout and in arguments to " ++ showIdent name
-            i <- segðaruna <?> "inward arguments to " ++ showIdent name
-            return (io, i)
+            refs <- segðaruna <?> "inout arguments to " ++ showIdent (unLoc name)
+            semi <?> "\";\" between inout and in arguments to " ++ showIdent (unLoc name)
+            args <- segðaruna <?> "inward arguments to " ++ showIdent (unLoc name)
+            return (refs, args)
 
 efsegð :: P Syntax
 efsegð = do
-    cond <- reserved "ef" *> (segð <?> "test expression")
+    cond <- reserved "ef" *> (loc segð <?> "condition of an if expression")
     then' <- reserved "þá" *> segðaruna
     elseifs <- many annarsef
     else' <- optionMaybe annars <* reserved "eflok"
     return $ IfS cond then' elseifs else'
     <?> "if expression"
     where
-        annarsef = liftA2 (,) (reserved "annarsef" *> (segð <?> "test expression")) (reserved "þá" *> segðaruna)
+        annarsef = liftA2 (,) (reserved "annarsef" *> (loc segð <?> "test expression")) (reserved "þá" *> segðaruna)
         annars = reserved "annars" *> (segðaruna <?> "else clause")
 
 valsegð :: P Syntax
 valsegð = do
-    value <- between (reserved "val") (reserved "úr") (segð <?> "scrutinee expression of case statement")
+    value <- between (reserved "val") (reserved "úr") (loc segð <?> "scrutinee expression of case statement")
     cases <- many kostur
     def <- optionMaybe (reserved "annars" *> segðaruna) <* reserved "vallok"
     return $ CaseS value cases def
     <?> "case statement"
     where
         kostur = do
-            ranges <- many1 $ do
+            ranges <- many1 . loc $ do
                 a <- reserved "kostur" *> valfasti
                 b <- optionMaybe (symbol ".." *> valfasti)
                 return (a, b)
@@ -387,13 +397,13 @@ valfasti = (CharLit <$> staffasti) <|> (NatLit <$> fjöldatala)
 
 fylkissegð :: P Syntax
 fylkissegð = do
-    expr <- smásegð
+    expr <- loc smásegð
     getter <- optionMaybe $ do
         indices <- squareBrackets $ segðaruna <?> "index expressions"
-        setter <- optionMaybe $ reservedOp ":=" *> segð
-        return (indices, setter)
+        value <- optionMaybe $ reservedOp ":=" *> loc segð
+        return (indices, value)
     return $ case getter of
-        Nothing -> expr
+        Nothing -> unLoc expr
         Just (indices, Nothing) -> GetterS expr indices
         Just (indices, Just value) -> SetterS expr indices value
 
@@ -459,27 +469,17 @@ parseGeneric p name text =
 parseProgram :: SourceName -> String -> Either ParseError Program
 parseProgram = parseGeneric forrit
 
-parseExpression :: SourceName -> String -> Either ParseError Syntax
-parseExpression = parseGeneric segð
+parseExpression :: SourceName -> String -> Either ParseError (Located Syntax)
+parseExpression = parseGeneric (loc segð)
 
-parseExpressions :: SourceName -> String -> Either ParseError [Syntax]
+parseExpressions :: SourceName -> String -> Either ParseError [Located Syntax]
 parseExpressions = parseGeneric segðaruna
 
-parseModule :: SourceName -> String -> Either ParseError ModuleDecl
-parseModule = parseGeneric eining
+parseModule :: SourceName -> String -> Either ParseError (Located ModuleDecl)
+parseModule = parseGeneric (loc eining)
 
-parseInnflutt :: SourceName -> String -> Either ParseError [Name]
+parseInnflutt :: SourceName -> String -> Either ParseError [Located Name]
 parseInnflutt = parseGeneric innflutt
 
-parseStaðvær :: SourceName -> String -> Either ParseError [(Name, Maybe Syntax)]
+parseStaðvær :: SourceName -> String -> Either ParseError [(Located Name, Maybe (Located Syntax))]
 parseStaðvær = parseGeneric staðvær
-
--- XXX These are orphan instances. Not a good idea.
-instance Applicative (GenParser tok state) where
-    pure = return
-    (<*>) = ap
-
-instance Alternative (GenParser tok state) where
-    empty = mzero
-    (<|>) = mplus
-

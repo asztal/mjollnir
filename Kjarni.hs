@@ -1,6 +1,6 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
-module Kjarni (kjarni) where
+module Kjarni (kjarni, út) where
 
 import Control.Applicative ((<$>), (<*>), pure)
 import Control.Monad.Trans (liftIO)
@@ -18,9 +18,43 @@ import Prelude hiding (readFile, putStrLn)
 import ListIx
 import ModuleHelpers
 
+út :: Compiler Module
+út = simpleModule "ÚT"
+    [ fun "nýlína" nýlína
+    , fun "skrifa" skrifa
+    , fun "skrifafjöl" skrifafjöl
+    , fun "skrifastreng" skrifastreng
+    ]
+
+nýlína T0 T0 = do
+    liftIO $ putStrLn ""
+    return Nil
+
+skrifa T0 (T1 x) = do
+    case x of
+        Word x -> liftIO . putStr . show =<< signed (Word x)
+        Str arr -> liftIO $ do
+            putStr "\""
+            putStr =<< map (toEnum . fromIntegral) . drop 1 <$> getElems arr
+            putStr "\""
+        _ -> liftIO . putStr =<< mshow x
+    return Nil
+
+skrifafjöl T0 (T1 x) = do
+    liftIO . putStr . show =<< unsigned x
+    return Nil
+
+skrifastreng T0 (T1 x) = do
+    arr <- string x
+    liftIO $ do
+        putStr "\""
+        putStr =<< map (toEnum . fromIntegral) . drop 1 <$> getElems arr
+        putStr "\""
+    return Nil
+
 kjarni :: Compiler Module
-kjarni = simpleModule
-    [ -- Functions that work with unsigned words
+kjarni = simpleModule "KJARNI"
+    [
       fun "!" not'
     , fun "%" natRem
     , fun "%%" intRem

@@ -28,22 +28,24 @@ module ModuleHelpers
 import Control.Applicative ((<$>))
 import qualified Data.Map as M
 
+import AST (LName)
 import Eval
 import Module
 import Compiler
 import Types
+import Located
 
 type NativeFun = [Var] -> [Value] -> Eval Value
 
-simpleModule :: [Compiler (Name, Export)] -> Compiler Module
-simpleModule exports = Module . M.fromList <$> sequence exports
+simpleModule :: Name -> [Compiler (LName, Export)] -> Compiler Module
+simpleModule name exports = Module (unknownSpan $ "module \"" ++ name ++ "\"") . M.fromList <$> sequence exports
 
-var :: Name -> Compiler (Name, Export)
-var name = (,) name . ExportVar <$> newMValue Nil
+var :: Name -> Compiler (LName, Export)
+var name = (,) (genLoc name) . ExportVar <$> newMValue Nil
 
-unimplemented :: Name -> Arity -> Compiler (Name, Export)
+unimplemented :: Name -> Arity -> Compiler (LName, Export)
 unimplemented name _ = 
-    return (name, ExportNative (-1, -1) func) where
+    return (genLoc name, ExportNative (-1, -1) func) where
         func _ _ = throw $ "Unimplemented function used: " ++ name
 
 class Args t where
@@ -118,12 +120,12 @@ instance Args T10 where
     args _ = error "Expected 10 arguments"
     argCount _ = 10
 
-fun :: forall io i. (Args io, Args i) => Name -> (io Var -> i Value -> Eval Value) -> Compiler (Name, Export)
+fun :: forall io i. (Args io, Args i) => Name -> (io Var -> i Value -> Eval Value) -> Compiler (LName, Export)
 fun name body = do
     let inArity = argCount (undefined :: i Value)
         inoutArity = argCount (undefined :: io Var)
         func io i = body (args io) (args i)
-    return (name, ExportNative (inoutArity, inArity) func)
+    return (genLoc name, ExportNative (inoutArity, inArity) func)
 
-fun' :: Name -> Arity -> NativeFun -> Compiler (Name, Export)
-fun' name arity body = return (name, ExportNative arity body)
+fun' :: Name -> Arity -> NativeFun -> Compiler (LName, Export)
+fun' name arity body = return (genLoc name, ExportNative arity body)

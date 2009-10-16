@@ -4,7 +4,6 @@
 
 module Module
     ( Module (Module)
-    , emptyModule
     , plusModule
     , combineModule
     , composeModule
@@ -33,19 +32,20 @@ import Data.Map (Map)
 import qualified Data.Map as M
 import Data.Maybe (catMaybes, fromMaybe)
 import Data.Ord (comparing)
-import Data.List (intercalate, nub, union, sort, sortBy, (\\), genericLength, groupBy)
+import Data.List (intercalate, union, sort, sortBy, genericLength, group, groupBy)
 import Data.Monoid (Monoid(..))
 import qualified Data.Traversable as T
 
 import AST
 import Eval
 import Compiler
+import Located
 
 import Prelude hiding (init)
 
 data Export
     = ExportVar (IORef Value)
-    | ExportAgain Name
+    | ExportAgain LName
     | ExportFun (IORef (Function Var Fun))
     | ExportNative Arity ([Var] -> [Value] -> Eval Value)
 
@@ -79,7 +79,7 @@ instance Monoid ImportType where
 
     mempty = ImportAny
 
-newtype Module = Module (Map Name Export)
+data Module = Module SrcSpan (Map LName Export)
 
 ------------------------------------------------------------------------------
 
@@ -88,10 +88,7 @@ instance (Monad f, Applicative f) => Applicative (SM.StateT s f) where
     pure = return
     (<*>) = ap
 
-emptyModule :: Module
-emptyModule = Module M.empty
-
-graphNodes :: Map Name Export -> Compiler [IORef (Function Var Fun)]
+graphNodes :: Map LName Export -> Compiler [IORef (Function Var Fun)]
 graphNodes m = do
     let roots = scannableExports (M.elems m)
     SM.execStateT (mapM_ scan roots) []
@@ -110,64 +107,76 @@ graphNodes m = do
 iterateModule :: Module -> Compiler Module
 composeModule, combineModule :: Module -> Module -> Compiler Module
 
-lookupExport :: Name -> Module -> Maybe Export
-lookupExport name (Module m) = M.lookup name m
+lookupExport :: LName -> Module -> Maybe Export
+lookupExport name (Module _ m) = M.lookup name m
 
 (iterateModule, composeModule, combineModule) = (iterateModule', composeModule', combineModule')
     where
 
     -- This is the "!" module operator, which links a module with itself, thus
     -- allowing recursive functions.
-    iterateModule' m = do
-        Module m' <- cloneModule m
+    iterateModule' (Module loc m) = context $ do
+        Module _ m' <- cloneModule (Module loc m)
         nodes <- graphNodes m'
 
         mapM_ (resolveFun m') nodes
-        iterated <- Module <$> T.mapM (resolveOther m') m'
+        iterated <- Module loc <$> T.mapM (resolveOther m') m'
 
         -- This shouldn't produce errors, but it's best to be sure.
         newImports <- moduleImports iterated
-        checkImportList "Conflicting imports when composing two modules" newImports
+        checkImportList loc "Conflicting imports when composing two modules" newImports
 
         return iterated
 
         where
+            context = withErrorContext $
+                "When iterating the module at " ++ show loc
+                
             resolveOther src (ExportAgain name) = resolveChain src [] (ExportAgain name)
             resolveOther _ x = return x
             
             resolveChain src seen (ExportAgain z)
-                | z `elem` seen = throwError $
-                    "Re-export cycle detected during module iteration: " ++ intercalate " -> " (head seen : reverse seen)
+                | z `elem` seen = throwAt loc $
+                    "Re-export cycle detected during module iteration: "
+                    : showCycle (head seen : reverse seen)
                 | otherwise = case M.lookup z src of
                     Just x -> resolveChain src (z : seen) x
                     Nothing -> return (ExportAgain z)
             resolveChain _ _ x = return x
 
+            showCycle xs = [ "  " ++ unLoc name ++ atLoc name | name <- xs ]
+
     -- TODO: Test if this works.
     -- Links a module with another module, but mixes in exports from the right-hand
     -- module into the exports of the result, where no clashes would occur.
-    combineModule' left right@(Module r) = do
-        Module composed <- composeModule' left right
+    combineModule' left@(Module lloc _) right@(Module rloc r) = context $ do
+        Module _ composed <- composeModule' left right
 
         -- M.union is left-biased, so this works in our favour.
-        return $ Module (M.union composed r)
+        return $ Module (combineSpan lloc rloc) (M.union composed r)
+        where
+            context = withErrorContext $
+                "When combining modules at " ++ show lloc ++ " and " ++ show rloc
 
     -- Links a module with another module, but does not bring exports from the second module
     -- into the exports of the result.
-    composeModule' left (Module right) = do
-        Module left' <- cloneModule left
+    composeModule' left@(Module lloc _) (Module rloc right) = context $ do
+        Module _ left' <- cloneModule left
 
         nodes <- graphNodes left'
         mapM_ (resolveFun right) nodes
     
-        composed <- Module <$> T.mapM (resolveOther right) left'
+        composed <- Module lloc <$> T.mapM (resolveOther right) left'
 
         newImports <- moduleImports composed
-        checkImportList "Conflicting imports when composing two modules" newImports
+        checkImportList lloc "Conflicting imports when composing two modules" newImports
 
         return composed
 
         where
+            context = withErrorContext $
+                "When composing modules at " ++ show lloc ++ " and " ++ show rloc
+
             resolveOther src (ExportAgain n) = case M.lookup n src of
                 Just ex -> return ex
                 Nothing -> return (ExportAgain n)
@@ -197,38 +206,50 @@ lookupExport name (Module m) = M.lookup name m
             Nothing -> return Nothing
             Just (ExportVar ref) -> return . Just $ ResolvedVar ref
             Just (ExportAgain name') -> return . Just $ NamedVar name'
-            Just (ExportNative arity _) -> throwError $
-                "Resolving " ++ name ++ ": Expected a variable; found a function of arity " ++ show arity
+            Just (ExportNative arity _) -> throwAt (getLoc name) $
+                [ "Resolving " ++ unLoc name ++
+                  ": Expected a variable; found a function of arity " ++
+                  show arity
+                ]
             Just (ExportFun ref) -> do
                 fun <- readMValue ref
-                throwError $ "Resolving " ++ name ++ ": Expected a variable; found a function of arity " ++ show (funArity fun)
+                throwAt (getLoc name)
+                    [ "Resolving " ++ unLoc name ++
+                      ": Expected a variable; found a function of arity " ++
+                       show (funArity fun)
+                    ]
 
         lookupFun name arity = do
             case M.lookup name src of
                 Nothing -> return Nothing
-                Just (ExportVar _) -> throwError $ "Resolving " ++ name ++ ": Expected a function of arity " ++ show arity ++ "; found a variable"
+                Just (ExportVar _) -> throwAt (getLoc name)
+                    [ "Resolving " ++ unLoc name ++
+                      ": Expected a function of arity " ++ show arity ++
+                      "; found a variable"
+                    ]
                 Just (ExportAgain name') -> return . Just $ NamedFun name' arity
                 Just (ExportFun ref) -> return . Just $ ResolvedFun arity ref
                 Just (ExportNative arity' fun) ->
                     if arity == arity'
                         then return . Just $ NativeFun arity fun
-                        else throwError $ "Resolving " ++ name ++
-                            ": Expected a function of arity " ++ show arity ++
-                            "; found a function of arity " ++ show arity'
-                            
+                        else throwAt (getLoc name)
+                            [ "Resolving " ++ unLoc name ++
+                              ": Expected a function of arity " ++ show arity ++
+                              "; found a function of arity " ++ show arity'
+                            ]
 
 -- When cloning a module, we may have to rewrite some of the function bodies
 -- if they refer to another function in the module (i.e., we are cloning an
 -- iterated module).
 cloneModule :: Module -> Compiler Module
-cloneModule (Module oldExports) = do
+cloneModule (Module loc oldExports) = do
     nodes <- graphNodes oldExports
     mappings <- mapM cloneNode nodes
 
     let newExports = fmap (updateExport mappings) oldExports
     SM.evalStateT (rewriteExports mappings (rewritableExports (M.elems newExports))) []
 
-    return $ Module newExports
+    return $ Module loc newExports
     where
         updateExport assocs (ExportFun ref) = case lookup ref assocs of
             Nothing -> ExportFun ref
@@ -261,50 +282,53 @@ cloneModule (Module oldExports) = do
 
 -- Adds two modules. If there are duplicate exports, an error is raised.
 plusModule :: Module -> Module -> Compiler Module
-plusModule l@(Module left) r@(Module right) = do
+plusModule l@(Module lloc left) r@(Module rloc right) = context $ do
     li <- moduleImports l
     ri <- moduleImports r
-    checkImportList "Conflicting imports found when adding two modules" (li ++ ri)
+    
+    checkImportList newLoc "Conflicting imports found when adding two modules" (li ++ ri)
 
-    case M.toList (M.intersection left right) of
-        [] -> return ()
-        xs -> throwError . unlines $
-            "Export conflicts found in a module sum:" : map showError xs
+    throwClashes
+        "Export conflicts found in a module sum"
+        newLoc
+        (findClashes $ map fst (M.toList left ++ M.toList right))
 
-    return $ Module (M.union left right)
+    return $ Module newLoc (M.union left right)
 
     where
-        showError (name, _) = show name ++ " is exported by both sides of the sum"
+        context = withErrorContext $ "When adding two modules at " ++ show lloc ++ " and " ++ show rloc
+        newLoc = combineSpan lloc rloc
 
-checkImportList :: String -> [(Name, ImportType)] -> Compiler ()
-checkImportList msg imports = do
+checkImportList :: SrcSpan -> String -> [(LName, ImportType)] -> Compiler ()
+checkImportList loc msg imports = do
     let sorted = sort imports
         grouped = groupBy ((==) `on` fst) sorted
         checked = map ((head *** mconcat) . unzip) grouped
 
     case importErrors checked of
         [] -> return ()
-        xs -> throwError . unlines $ msg : xs
+        xs -> throwAt loc $ msg : xs
 
     where
-        importErrors xs = [ "  " ++ name ++ ": " ++ show err
-                          | (name, err@(ImportError _)) <- xs ]
+        importErrors xs = [ name ++ ": " ++ atLoc (L loc name)
+                          | (L loc name, ImportError _) <- xs ]
 
 debugModule :: Name -> Module -> Compiler ()
 debugModule name m = debugImports name m >> debugExports name m
 
 debugExports :: Name -> Module -> Compiler ()
-debugExports moduleName (Module exports) =
+debugExports moduleName (Module loc exports) =
     liftIO $ do
-        putStrLn $ "Exports for module " ++ show moduleName ++ ":"
+        putStrLn $ "Exports for module " ++ show moduleName ++ " (" ++ show loc ++ "):"
         mapM_ (uncurry printExport) (M.toList exports)
     where
         printExport name export = do
             display <- showExport export
-            putStrLn $ "  " ++ name ++ " -> " ++ display
+            putStrLn $ "  " ++ unLoc name ++ " -> " ++ display
+            putStrLn $ "    (at " ++ show (getLoc name) ++ ")"
 
         showExport (ExportVar _) = return "breyta"
-        showExport (ExportAgain n) = return n
+        showExport (ExportAgain n) = return $ unLoc n
         showExport (ExportNative arity _) = return $ show (ImportFun arity)
         showExport (ExportFun f) = showFun f
         showFun r = do
@@ -318,13 +342,13 @@ debugImports moduleName m = do
         putStrLn $ "Imports for module " ++ show moduleName ++ ":"
         mapM_ (uncurry printImport) imports
     where
-        printImport name importType = putStrLn $ "  " ++ name ++ " :: " ++ show importType
+        printImport name importType = putStrLn $ "  " ++ unLoc name ++ " :: " ++ show importType
 
 -- TODO: If a variable is imported but not actually used, it is disregarded
 --       by the module system. I think the Rejkjavík compiler might do this
 --       too, it's best to check.
-moduleImports :: Module -> Compiler [(Name, ImportType)]
-moduleImports (Module m) = 
+moduleImports :: Module -> Compiler [(LName, ImportType)]
+moduleImports (Module _ m) = 
     concat <$> SM.evalStateT (mapM imports (M.elems m)) []
 
     where
@@ -375,18 +399,15 @@ moduleImports (Module m) =
 
 -- Converts a module declaration to a Module. A module declaration has only
 -- unresolved imports.
-singleModule :: [(Name, ExportDecl)] -> Compiler Module
-singleModule decls = do
+singleModule :: Located [(LName, ExportDecl)] -> Compiler Module
+singleModule (L declLoc decls) = do
     checkExportsUnique
-
-    return . Module . M.fromList =<< compileExports
-        
+    return . Module declLoc . M.fromList =<< compileExports        
     where
-        checkExportsUnique = case sorted \\ nub sorted of
-            [] -> return ()
-            xs -> throwError $ "Module literal exports names more than once: " ++ intercalate ", " (nub xs)
-            where
-                sorted = sort (map fst decls)
+        checkExportsUnique = throwClashes
+            "Module exports names more than once: "
+            declLoc
+            (findClashes $ map fst decls)
     
         -- Get the list of exported functions from an export declaration list.
         compileExports = mapM (uncurry f) decls where
@@ -399,8 +420,17 @@ singleModule decls = do
                 return (name, ExportVar ref)
             f name (ExportAgainDecl source) = return (name, ExportAgain source)
 
-compileFunction :: FunctionDecl -> Compiler (Function Var Fun)
-compileFunction FunctionDecl {..} = do
+findClashes xs = filter (not . null . tail) . group . sort $ xs
+
+throwClashes :: String -> SrcSpan -> [[LName]] -> Compiler ()
+throwClashes msg loc xs = case xs of
+    [] -> return ()
+    xs -> throwAt loc $ msg : concatMap showClash xs
+    where
+        showClash names = [ "  " ++ unLoc name ++ atLoc name | name <- names ]
+
+compileFunction :: Located FunctionDecl -> Compiler (Function Var Fun)
+compileFunction (L funLoc FunctionDecl {..}) = context $ do
     checkVarNames $ fnInOutParams ++ fnInParams ++ concatMap variableDeclNames fnVariables
 
     body <- compileBody
@@ -412,10 +442,12 @@ compileFunction FunctionDecl {..} = do
         body
 
     where
+        context = withErrorContext $ "When compiling function at " ++ show funLoc
+    
         compileBody = do
-            bodyExp <- toExp (BlockS fnBody)
+            bodyExps <- mapM toExp fnBody
             initExps <- compileInitializers
-            return $ simplifyE (ManyE (initExps ++ [bodyExp]))
+            return $ simplifyE (ManyE (initExps ++ bodyExps))
 
         simplifyE (ManyE []) = ConstE Nil
         simplifyE (ManyE [x]) = x
@@ -430,11 +462,8 @@ compileFunction FunctionDecl {..} = do
         (allLocals, importedVars) = (concat *** concat) . partitionEithers $ map f fnVariables where
             f (LocalVarDecl xs) = Left xs
             f (ImportVarDecl xs) = Right xs
-    
-        checkVarNames xs = case xs \\ nub xs of
-            [] -> return ()
-            dups -> throwError $
-                "Variable declared multiple times: " ++ intercalate ", " dups
+
+        checkVarNames xs = throwClashes "Variable declared multiple times: " funLoc (findClashes xs)
 
         argMap = indexMap fnInParams
         refArgMap = indexMap fnInOutParams
@@ -448,74 +477,97 @@ compileFunction FunctionDecl {..} = do
 
         toExp = syntaxToExp localMap argMap refArgMap importedVars
 
-syntaxToExp :: Map VarName Int -> Map VarName Int -> Map VarName Int -> [VarName]
-            -> Syntax
+syntaxToExp :: Map LVarName Int -> Map LVarName Int -> Map LVarName Int -> [LVarName]
+            -> Located Syntax
             -> Compiler (Exp Var Fun)
-syntaxToExp localIndices argIndices refArgIndices importedVars expr = case expr of
-    LiteralS lit -> return $ transformLiteral lit
-    ListS [] -> return $ ConstE Nil
-    ListS (x:xs) -> recur $ OperatorS ":" x (ListS xs)
+syntaxToExp localIndices argIndices refArgIndices importedVars (L loc expr) =
+    context $ case expr of
+        LiteralS lit -> return $ transformLiteral lit
+        ListS [] -> return $ ConstE Nil
+        ListS (x:xs) -> app (withLoc x ":") [] [x, L loc $ ListS xs] -- Location info isn't perfect here.
 
-    FunRefS name arity -> return $ FunE (NamedFun name arity) arity
-    VarRefS name -> ReadE <$> lookupVarD name
+        FunRefS name (L _ arity) -> return $ FunE (NamedFun name arity) arity
+        VarRefS name -> ReadE <$> lookupVarD name
 
-    GetterS a is -> recur $ OperatorCallS ("fylkissækja" ++ show (length is)) (a:is)
-    SetterS a is e -> recur $ OperatorCallS ("fylkissetja" ++ show (length is)) (a:is ++ [e])
-    AssignS name e -> WriteE <$> lookupVarD name <*> recur e
+        GetterS a is -> recur . L loc $ OperatorCallS (withLoc a $ "fylkissækja" ++ show (length is)) (a:is)
+        SetterS a is e -> recur . L loc $ OperatorCallS (withLoc a $ "fylkissetja" ++ show (length is)) (a:is ++ [e])
+        AssignS name e -> WriteE <$> lookupVarD name <*> recur e
 
-    FunCallS name refs args -> app name refs args
-    OperatorS name x y -> app name [] [x, y]
-    OperatorCallS name args -> app name [] args
-    OperatorUnaryS name x -> app name [] [x]
+        FunCallS name refs args -> app name refs args
+        OperatorS name x y -> app name [] [x, y]
+        OperatorCallS name args -> app name [] args
+        OperatorUnaryS name x -> app name [] [x]
 
-    AndS x y -> AndE <$> recur x <*> recur y
-    OrS x y -> OrE <$> recur x <*> recur y
-    NotS x -> NotE <$> recur x
+        AndS x y -> AndE <$> recur x <*> recur y
+        OrS x y -> OrE <$> recur x <*> recur y
+        NotS x -> NotE <$> recur x
 
-    CaseS cond cases defaultCase -> CaseE
-        <$> recur cond
-        <*> mapM toBranch cases
-        <*> maybe (pure (ConstE Nil)) (recur . BlockS) defaultCase
+        CaseS cond cases defaultCase -> do
+            CaseE
+            <$> recur cond
+            <*> mapM toBranch cases
+            <*> maybe (pure (ConstE Nil)) recurs defaultCase
 
-    IfS cond thenExp elseIfs otherwiseExp ->
-        IfE <$> recur cond <*> recur (BlockS thenExp) <*> case elseIfs of
-            ((cond', thenExp') : rest) -> recur $ IfS cond' thenExp' rest otherwiseExp
-            [] -> maybe (return (ConstE Nil)) (recur . BlockS) otherwiseExp
+        IfS cond thenExp elseIfs otherwiseExp ->
+            fold $ (cond, thenExp) : elseIfs
+            where
+                fold [] = maybe (pure (ConstE Nil)) recurs otherwiseExp
+                fold ((cond, thenExp) : rest) = IfE <$> recur cond <*> recurs thenExp <*> fold rest
 
-    WhileLoopS cond body -> recur . LoopS $
-        IfS cond [ListS []] [] (Just [BreakS]) : body
+        WhileLoopS cond body -> while cond body
+        ForLoopS inits cond incs body -> for inits cond incs body 
         
-    ForLoopS inits cond incs body -> recur . BlockS $
-        BlockS inits : WhileLoopS cond (body ++ incs) : []
-    
-    LoopS xs -> LoopE . ManyE <$> mapM recur xs
+        LoopS xs -> LoopE . ManyE <$> mapM recur xs
 
-    BlockS [] -> return $ ConstE Nil
-    BlockS [x] -> recur x
-    BlockS xs -> ManyE <$> mapM recur xs
-    
-    BreakS -> return BreakE
-    ReturnS x -> ReturnE <$> recur x
+        BlockS [] -> return $ ConstE Nil
+        BlockS [x] -> recur x
+        BlockS xs -> ManyE <$> mapM recur xs
+        
+        BreakS -> return BreakE
+        ReturnS x -> ReturnE <$> recur x
     
     where
+        context = withErrorContext $ "When compiling function at " ++ show loc
+    
         recur = syntaxToExp localIndices argIndices refArgIndices importedVars
+
+        recurs [] = return $ ConstE Nil
+        recurs [x] = recur x
+        recurs xs = ManyE <$> mapM recur xs
+
+        while cond body = do
+            break <- IfE <$> recur cond <*> pure (ConstE Nil) <*> pure BreakE
+            LoopE . insertBreak break <$> recurs body
+            where
+                insertBreak break (ManyE xs) = ManyE (break : xs)
+                insertBreak break (ConstE Nil) = break
+                insertBreak break x = ManyE [break, x]
+
+        for inits cond incs body = do
+            inits' <- recurs inits
+            body' <- while cond (body ++ incs)
+            return . simplifyE $ ManyE [inits', body']
+
+        simplifyE (ManyE xs) = ManyE $ concatMap f xs where
+            f (ManyE xs) = xs
+            f x = [x]
+        simplifyE e = e
         
         app name refs args = AppE
             <$> pure (possiblyFun name (genericLength refs, genericLength args))
             <*> mapM toRefVar refs
             <*> mapM recur args
 
-        toRefVar e = case e of
+        toRefVar (L l e) = case e of
             VarRefS name -> Right <$> lookupVarD name
-            x -> Left <$> recur x
+            x -> Left <$> recur (L l x)
 
         lookupVarD name = 
             maybe (tryImport name) return $ lookupVar name
 
         tryImport name
             | name `elem` importedVars = return $ NamedVar name
-            | otherwise = throwError $
-                "Unbound variable " ++ show name ++ " used (did you mean to import it?)"
+            | otherwise = throwAt (getLoc name) [ "Unbound variable " ++ show name ++ " used (did you mean to import it?)" ]
 
         lookupVar name = msum $ zipWith find
                 [localIndices, argIndices, refArgIndices]
@@ -533,10 +585,10 @@ syntaxToExp localIndices argIndices refArgIndices importedVars expr = case expr 
             listArray (0, len) (fromIntegral len : map (fromIntegral . ord) xs)
 
         toBranch (ranges, body) = do
-            bodyExp <- recur (BlockS body)
+            bodyExp <- recurs body
             return (map toRange ranges, bodyExp)
             
-        toRange (from, to) =
+        toRange (L _ (from, to)) =
             (literalAsWord16 from, literalAsWord16 $ fromMaybe from to)
 
         literalAsWord16 (CharLit c) = fromIntegral (ord c)

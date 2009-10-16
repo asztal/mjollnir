@@ -70,7 +70,7 @@ class MShow m a where
 instance MonadIO m => MShow m Value where
     mshow (Word w) = return (show w)
     mshow (Real f) = return (show f)
-    mshow (Str s) = liftM (('"':) . (++"\"") . map (toEnum . fromIntegral) . tail) (liftIO (getElems s))
+    mshow (Str s) = liftM (('"':) . (++"\"") . map (toEnum . fromIntegral) . drop 1) (liftIO (getElems s))
     mshow (Array xs) = do
         b <- liftIO $ getBounds xs
         return $ "<array: length = " ++ show (rangeSize b) ++ ">"
@@ -186,7 +186,7 @@ try x = left errorMessage <$> E.try x
 ------------------------------------------------------------------------------
 
 data Var
-    = NamedVar VarName
+    = NamedVar LVarName
     | ResolvedVar (IORef Value)
     | ClosedVar (IOArray Int Value) !Int
     | LocalVar !Int
@@ -201,7 +201,7 @@ data Function v f = Function
     }
 
 data Fun
-    = NamedFun FunName Arity
+    = NamedFun LFunName Arity
     | NativeFun Arity ([Var] -> [Value] -> Eval Value)
     | ResolvedFun Arity (IORef (Function Var Fun))
 
