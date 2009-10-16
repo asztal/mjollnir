@@ -87,7 +87,8 @@ instance MonadIO m => MShow m Value where
                     return $ prefix ++ x' ++ "," ++ rest
                 _ -> do
                     rest <- mshow xs'
-                    return $ x' ++ ":" ++ rest ++ suffix
+                    -- Oddly, it uses lisp syntax for improper lists.
+                    return $ x' ++ " . " ++ rest ++ suffix
     mshow (Fun _) = return $ "stef(?)"
     mshow Nil = return "[]"
 

@@ -1,6 +1,6 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
-module Kjarni (kjarni, út) where
+module Kjarni (kjarni, ut, strengir, snua, skrifalin, lesalinu, inn) where
 
 import Control.Applicative ((<$>), (<*>), pure)
 import Control.Monad.Trans (liftIO)
@@ -18,8 +18,60 @@ import Prelude hiding (readFile, putStrLn)
 import ListIx
 import ModuleHelpers
 
-út :: Compiler Module
-út = simpleModule "ÚT"
+kjarni, ut, snua, strengir, skrifalin :: Compiler Module
+
+inn = simpleModule "INN"
+    [ unimplemented "lesa" (0,0)
+    -- Clashes with LESALINU
+    -- , unimplemented "lesalínu" (0,0)
+    , unimplemented "lesastaf" (0,0)
+    , unimplemented "næstistafur" (0,0)
+    ]
+
+------------------------------------------------------------------------------
+
+lesalinu = simpleModule "LESALINU" [ unimplemented "lesalínu" (0,0) ]
+
+------------------------------------------------------------------------------
+
+skrifalin = simpleModule "SKRIFALIN" [ fun "skrifalínu" skrifalínu ]
+
+skrifalínu T0 (T1 x) = do
+    skrifastreng T0 (T1 x)
+    liftIO $ putStrLn ""
+    return Nil
+
+------------------------------------------------------------------------------
+
+snua = simpleModule "SNUA" [ fun "snúa" snúa ]
+
+snúa T0 (T1 p@(Pair _ _)) = makeList . reverse =<< fromList p
+    where
+        fromList :: Value -> Eval [Value]
+        fromList (Pair x xs) = 
+            (:) <$> readMValue x <*> (fromList =<< readMValue xs)
+        fromList _ = return []  -- Yes, snúa discards the last part of an
+                                -- improper list.
+                                -- The moral of the story is not to use
+                                -- snúa on improper lists.
+
+        makeList [] = return Nil
+        makeList (x:xs) = Pair <$> newMValue x <*> (newMValue =<< makeList xs)
+snúa T0 (T1 x) = expectedPair x   
+
+------------------------------------------------------------------------------
+
+strengir = simpleModule "STRENGIR"
+    [ unimplemented "erstafurístreng" (0,2)
+    , unimplemented "lengd" (0,1)
+    , unimplemented "strengskeyta" (0,2)
+    , unimplemented "hlutstrengur" (0,3)
+    , unimplemented "strengurístreng" (0,3)
+    ]
+
+------------------------------------------------------------------------------
+
+ut = simpleModule "UT"
     [ fun "nýlína" nýlína
     , fun "skrifa" skrifa
     , fun "skrifafjöl" skrifafjöl
@@ -52,7 +104,8 @@ skrifastreng T0 (T1 x) = do
         putStr "\""
     return Nil
 
-kjarni :: Compiler Module
+------------------------------------------------------------------------------
+
 kjarni = simpleModule "KJARNI"
     [
       fun "!" not'

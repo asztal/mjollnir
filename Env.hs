@@ -52,16 +52,35 @@ lookupEnv name (Env e) = M.lookup name e
 --       (
 defaultEnv :: Compiler Env
 defaultEnv = context $ do
-    k <- double <$> kjarni
-    u <- út
-    g <- plusModule u k
-    let felakjar = fela k
-        felagrun = fela g
+    [ kjarni, ut, strengir, snua, skrifalin, lesalinu, inn ] <- sequence
+        [ double <$> kjarni, ut, strengir, snua, skrifalin, lesalinu, inn ]
+    
+    grunnur <- foldM plusModule kjarni [ut, strengir, snua, skrifalin, lesalinu]
+    inn <- plusModule lesalinu inn -- both LESALINU and INN export "lesalínu"
+
+    -- Make libraries which re-export the base libaries, but with parentheses. 
+    -- "FELAKJAR" = {
+    --   ! -> (!)
+    --   % -> (%)
+    --   ...
+    --   vistfang -> (vistfang)
+    -- }
+    -- etc. Since it's not possible to export a name with
+    -- parentheses from the language itself, linking a module with FELAGRUN
+    -- or FELAKJAR means that the names definitely refer to KJARNI or
+    -- GRUNNUR.
+    let felakjar = fela kjarni
+        felagrun = fela grunnur
 
     let env' = foldM combineEnv emptyEnv
-            [ singletonEnv (genLoc "KJARNI") k
-            , singletonEnv (genLoc "ÚT") u
-            , singletonEnv (genLoc "GRUNNUR") g
+            [ singletonEnv (genLoc "KJARNI") kjarni
+            , singletonEnv (genLoc "UT") ut
+            , singletonEnv (genLoc "STRENGIR") strengir
+            , singletonEnv (genLoc "SNUA") snua
+            , singletonEnv (genLoc "SKRIFALIN") skrifalin
+            , singletonEnv (genLoc "LESALINU") lesalinu
+            , singletonEnv (genLoc "INN") inn
+            , singletonEnv (genLoc "GRUNNUR") grunnur
             , singletonEnv (genLoc "FELAGRUN") felagrun
             , singletonEnv (genLoc "FELAKJAR") felakjar
             ]
