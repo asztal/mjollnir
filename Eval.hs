@@ -23,7 +23,6 @@ import Data.Array.Unboxed (UArray)
 import Data.Typeable (Typeable)
 
 import AST
-import ListIx
 import MValue
 
 data WordTag
@@ -38,7 +37,7 @@ data Value
     = Word !Word16
     | Real !Double
     | Str (IOUArray Int Word8)
-    | Array (IOArray (ListIx Int) Value)
+    | Array (IOArray Int Value)
     | Fun Fun
     | Pair (IORef Value) (IORef Value)
     | Nil

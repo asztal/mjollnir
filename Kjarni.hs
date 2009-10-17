@@ -3,6 +3,7 @@
 module Kjarni (kjarni, ut, strengir, snua, skrifalin, lesalinu, inn) where
 
 import Control.Applicative ((<$>), (<*>), pure)
+import Control.Monad (when)
 import Control.Monad.Trans (liftIO)
 
 import Data.Bits ((.&.), (.|.), xor, shiftL, shiftR)
@@ -12,10 +13,9 @@ import Data.Word (Word, Word8, Word16, Word32)
 import System.Exit (exitWith, ExitCode(..))
 import System.Mem (performGC)
 
-import System.IO.UTF8 (readFile, putStrLn)
+import System.IO.UTF8 (putStrLn)
 import Prelude hiding (readFile, putStrLn)
 
-import ListIx
 import ModuleHelpers
 
 kjarni, ut, snua, strengir, skrifalin :: Compiler Module
@@ -146,7 +146,7 @@ kjarni = simpleModule "KJARNI"
     , fun "|" $ bitwiseOp (.|.)
     , fun "||" $ bitwiseOp xor
     , tbi "brjóta" (0,1)
-    , tbi "brot" (0,1)
+    , fun "brot" brot
     , tbi "bætfylla" (0,1)
     , fun "erfleyt" erfleyt
     , fun "erfleytneikvæd" erfleytneikvæd
@@ -159,16 +159,16 @@ kjarni = simpleModule "KJARNI"
     , fun "ertóm" ertóm
     , fun "fdeiling" fdeiling
     , tbi "fjöltilfleyt" (0,1)
-    , tbi "fleytitala" (0,3)
-    , tbi "fleytmínus" (0,1)
-    , tbi "fleyttilfjöl" (0,1)
+    , fun "fleytitala" fleytitala
+    , fun "fleytmínus" fleytmínus
+    , fun "fleyttilfjöl" fleyttilfjöl
     , tbi "flytja" (0,5)
-    , tbi "fmargfeldi" (0,5)
-    , tbi "fmismunur" (2,2)
-    , tbi "formerki" (0,1)
-    , tbi "fsumma" (2,2)
-    , tbi "fylkissetja1" (0,3)
-    , tbi "fylkissækja1" (0,2)
+    , fun "fmargfeldi" fmargfeldi
+    , fun "fmismunur" fmismunur
+    , fun "formerki" formerki
+    , fun "fsumma" fsumma
+    , fun "fylkissetja1" fylkissetja1
+    , fun "fylkissækja1" fylkissækja1
     , tbi "fylla" (0,4)
     , fun "halasetja" halasetja
     , fun "hali" hali
@@ -177,10 +177,10 @@ kjarni = simpleModule "KJARNI"
     , fun "hábæti" hábæti
     , tbi "hdeiling" (2,3)
     , tbi "hhliðra" (0,2)
-    , tbi "hlunksetja" (0,3)
-    , tbi "hlunkstærð" (0,1)
-    , tbi "hlunksækja" (0,2)
-    , tbi "hlunkur" (0,1)
+    , fun "hlunksetja" hlunksetja
+    , fun "hlunkstærð" hlunkstærð
+    , fun "hlunksækja" hlunksækja
+    , fun "hlunkur" hlunkur
     , tbi "hmargfeldi" (2,2)
     , tbi "hmismunur" (2,2)
     , tbi "hsumma" (2,2)
@@ -212,7 +212,7 @@ kjarni = simpleModule "KJARNI"
     , fun "strengur" strengur
     , fun "stækka" stækka
     , tbi "útbæti" (0,2)
-    , tbi "veldi" (0,1)
+    , fun "veldi" veldi
     , tbi "vhliðra" (0,2)
     , tbi "vistfang" (0,1)
     ]
@@ -231,6 +231,13 @@ natQuot T0 (T2 x y) = wordBinOp unsigned quot T0 (T2 x y)
 
 intQuot T0 (T2 _ (Word 0)) = throw $ "Divide by zero error"
 intQuot T0 (T2 x y) = wordBinOp signed quot T0 (T2 x y)
+
+brot T0 (T1 x) = do
+    x <- real x
+    -- Fjölnir represents floats as (1+b/65536)*2^w, not (c/65536)*(2^(w+1)).
+    let b = truncate ((significand x * 2 - 1) * 65536) - 1
+    -- Why this is also necessary, I am not sure.
+    return . Word . (if x < 0 then negate else id) $ b + 1
 
 cons T0 (T2 x y) = Pair <$> newMValue x <*> newMValue y
 
@@ -274,6 +281,75 @@ fdeiling (T2 a b) (T3 ax ay az) = do
     writeMValue b . Word . fromIntegral $ ab .&. 0xFFFF
     return Nil
 
+fleytitala T0 (T3 f b v) = do
+    f <- unsigned f
+    b <- unsigned b
+    v <- signed v
+    return $ Real $ (if f /= 0 then negate else id) ((1+fromIntegral b/65536) * (2**fromIntegral v))
+
+fleytmínus T0 (T1 x) = Real . negate <$> real x
+
+fleyttilfjöl T0 (T1 x) = do
+    x <- real x
+    let x' :: Int32 = truncate (abs x)
+    if x' > 65535
+        then return (Word 0)
+        else return (Word $ fromIntegral x')
+
+fmargfeldi (T2 a b) (T2 ax ay) = do
+    x <- word32 ax
+    y <- word32 ay
+    writeSplitWord32 a b (x * y)
+    return Nil
+
+fmismunur (T2 a b) (T2 ax ay) = do
+    x <- unsigned ax
+    y <- unsigned ay
+    writeMValue a $ Word . fromIntegral $ (max x y) - (min x y)
+    writeMValue b $ if x > y then Word 0 else Word 1
+    return Nil
+
+formerki T0 (T1 x) = do
+    x <- real x
+    if x >= 0 && not (isNegativeZero x)
+        then return (Word 0)
+        else return (Word 1)
+
+fsumma (T2 a b)  (T2 ax ay) = do
+    x <- word32 ax
+    y <- word32 ay
+    writeSplitWord32 a b (x + y)
+    return Nil
+
+fylkissetja1 T0 (T3 (Str s) i g) = do
+    b <- liftIO $ getBounds s
+    i <- unsigned i
+    g' <- char g
+    when (inRange b i) $ liftIO $ writeArray s i g'
+    return g
+fylkissetja1 T0 (T3 (Array a) i g) = do
+    i <- unsigned i
+    b <- liftIO $ getBounds a
+    when (inRange b i) $ liftIO $ writeArray a i g
+    return g
+fylkissetja1 T0 (T3 x _ _) = do
+    throw $ "fylkissetja1: expected array or string, given " ++ show x
+
+fylkissækja1 T0 (T2 (Str s) i) = do
+    b <- liftIO $ getBounds s
+    i <- unsigned i
+    if inRange b i
+        then liftIO $ Word . fromIntegral <$> readArray s i
+        else return Nil
+fylkissækja1 T0 (T2 (Array a) i) = do
+    b <- liftIO $ getBounds a
+    i <- unsigned i
+    if inRange b i
+        then liftIO $ readArray a i
+        else return Nil
+fylkissækja1 T0 (T2 x _) = do
+    throw $ "fylkissækja1: expected array or string, given " ++ show x
+
 halasetja T0 (T2 (Pair _ b) x) = writeMValue b x >> return Nil
 halasetja T0 (T2 x _) = expectedPair x
 
@@ -289,6 +365,33 @@ hætta T0 (T1 x) = liftIO . exitWith . ExitFailure =<< signed x
 
 haussetja T0 (T2 (Pair a _) x) = writeMValue a x >> return Nil
 haussetja T0 (T2 x _) = expectedPair x
+
+-- TODO: The official implementation seems to have no problem reading and
+-- writing outside the bounds of the array, and according to hlunkstærð it
+-- didn't grow the array. Perhaps it's doing something weird, or maybe I
+-- just got lucky.
+hlunksetja T0 (T3 x y g) = do
+    x <- array x
+    y <- unsigned y
+    bounds <- liftIO $ getBounds x
+    when (inRange bounds y) $ liftIO $ writeArray x y g
+    return Nil
+
+hlunkstærð T0 (T1 arr) = do
+    arr <- array arr
+    Word . fromIntegral . rangeSize <$> liftIO (getBounds arr)
+
+hlunksækja T0 (T2 x y) = do
+    x <- array x
+    y <- unsigned y
+    bounds <- liftIO (getBounds x)
+    if inRange bounds y
+        then liftIO $ readArray x y
+        else return Nil
+
+hlunkur T0 (T1 x) = do
+    x <- unsigned x
+    Array <$> liftIO (newArray (0, x-1) Nil)
 
 innfjöldi = funArityBy snd
 innútfjöldi = funArityBy fst
@@ -359,6 +462,9 @@ strengur T0 (T1 x) = do
     liftIO $ writeArray arr 0 (fromIntegral len)
     return $ Str arr
 
+-- Fjölnir represents floats as (1+b/65536)*2^w, not (c/65536)*(2^(w+1)).
+veldi T0 (T1 x) = Word . fromIntegral . subtract 1 . exponent <$> real x
+
 ------------------------------------------------------------------------------
 
 expectedWord x =   throw $ "Expected 16-bit integer, given " ++ show x
@@ -368,6 +474,8 @@ expectedFloat x =  throw $ "Expected floating-point number, given " ++ show x
 expectedPair x =   throw $ "Expected pair, given " ++ show x
 expectedString x = throw $ "Expected string, given " ++ show x
 expectedFun x =    throw $ "Expected function, given " ++ show x
+expectedArray x =  throw $ "Expected array, given " ++ show x
+expectedChar x =   throw $ "Expected character, given " ++ show x
 
 ------------------------------------------------------------------------------
 
@@ -381,6 +489,7 @@ notEqual cmp T0 (T2 x y) = convert . not . (== EQ) <$> cmp x y
 ------------------------------------------------------------------------------
 
 signed, unsigned :: Value -> Eval Int
+char :: Value -> Eval Word8
 word :: Value -> Eval Word16
 word32 :: Value -> Eval Word32
 signed32 :: Value -> Eval Int32
@@ -393,6 +502,9 @@ signed x = expectedWordS x
 
 unsigned (Word x) = return (fromIntegral x)
 unsigned x = expectedWordU x
+
+char (Word x) = return $ fromIntegral x
+char x = expectedChar x
 
 word (Word x) = return x
 word x = expectedWord x
@@ -410,6 +522,10 @@ string x = expectedString x
 
 stef (Fun x) = return x
 stef x = expectedFun x
+
+array (Array x) = return x
+array x = expectedArray x
+
 
 realBinOp f T0 (T2 x y) = fmap Real . f <$> real x <*> real y
 wordBinOp extract f T0 (T2 x y) = fmap (Word . fromIntegral) . f <$> extract x <*> extract y
@@ -436,3 +552,9 @@ funArityBy selector T0 (T1 x) = do
                 NativeFun ar _ -> ar
                 ResolvedFun ar _ -> ar
     return . Word $ fromIntegral count
+
+------------------------------------------------------------------------------
+
+writeSplitWord32 a b w = do
+    writeMValue a (Word $ fromIntegral $ w `shiftR` 16)
+    writeMValue b (Word $ fromIntegral $ w .&. 0xFFFF)
