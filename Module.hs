@@ -20,11 +20,9 @@ module Module
 import Control.Applicative (Applicative(..), (<$>), (<$))
 import Control.Arrow ((***))
 import qualified Control.Monad.State as SM
-import Control.Monad (msum, ap, forM_, when)
+import Control.Monad
 import Control.Monad.Trans (MonadIO(..))
-import Control.Monad.Error (MonadError (..))
 
-import Data.Array.Unboxed (listArray)
 import Data.Either
 import Data.Function
 import Data.List
@@ -35,6 +33,7 @@ import Data.Monoid (Monoid(..))
 import qualified Data.Traversable as T
 
 import AST
+import Exp
 import Eval
 import Compiler
 import Located
@@ -350,9 +349,6 @@ moduleImports (Module _ m) =
     concat <$> SM.evalStateT (mapM imports (M.elems m)) []
 
     where
-        --type S a = StateT [IORef (Function UVar UFun)] Compiler a
-    
-        --imports :: UExport -> S [(Name, ImportType)]
         imports (ExportVar _) = return []
         imports (ExportNative _ _) = return []
         imports (ExportAgain n) = return [(n, ImportAny)]
@@ -362,13 +358,11 @@ moduleImports (Module _ m) =
                 then return []
                 else imports' =<< readMValue ref
 
-        --imports' :: Function UVar UFun -> S [(Name, ImportType)]
         imports' fun = do
             (resolved, named) <- ufunImports fun
             nestedImports <- mapM imports' resolved
             return (named ++ concat nestedImports)
 
-        -- ufunImports :: Function UVar UFun -> S ([Function UVar UFun], [(Name, ImportType)])
         ufunImports fun = do
             let (vn, vi) = (concat *** concat) . partitionEithers $ map f vars
             (fn, fi) <- (concat *** concat) . partitionEithers <$> mapM g funs

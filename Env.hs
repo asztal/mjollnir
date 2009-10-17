@@ -1,16 +1,17 @@
-{-# LANGUAGE PatternGuards #-}
+{-# LANGUAGE PatternGuards, GeneralizedNewtypeDeriving #-}
 
 module Env
-    ( buildEnv
-    , Env
+    ( Env
+    , EnvM, runEnv, runDefaultEnv
+    , perform
     , emptyEnv
     ) where
 
-import Control.Arrow (first, second)
-import Control.Applicative ((<$>), (<*>))
+import Control.Arrow
+import Control.Applicative
 import qualified Control.Monad.State as SM
-import Control.Monad (join, when, foldM)
-import Control.Monad.Trans (lift)
+import Control.Monad
+import Control.Monad.Trans (MonadIO(..), lift)
 import Control.Monad.Error (MonadError(..))
 
 import qualified Data.Map as M
@@ -48,8 +49,17 @@ lookupEnv name (Env e) = M.lookup name e
 
 ------------------------------------------------------------------------------
 
--- TODO: Separate KJARNI into whatever submodules it's supposed to be made of.
---       (
+newtype EnvM a = EnvM (SM.StateT ([(LName, Fun)], Env) Compiler a)
+    deriving (MonadIO, Monad, Functor, Applicative, MonadError CompilerError, SM.MonadState ([(LName, Fun)], Env))
+
+runDefaultEnv (EnvM m) = do
+    e <- defaultEnv
+    SM.execStateT m ([], e)
+
+runEnv e (EnvM m) = SM.execStateT m ([], e)
+
+------------------------------------------------------------------------------
+
 defaultEnv :: Compiler Env
 defaultEnv = context $ do
     [ kjarni, ut, strengir, snua, skrifalin, lesalinu, inn ] <- sequence
@@ -85,7 +95,7 @@ defaultEnv = context $ do
             , singletonEnv (genLoc "FELAKJAR") felakjar
             ]
     case env' of
-        Left xs -> throwAt genSpan ["Internal error: default environment not consistent", xs]
+        Left xs -> throwAt noSpan ["Internal error: default environment not consistent", xs]
         Right a -> return a
 
     where
@@ -94,30 +104,26 @@ defaultEnv = context $ do
         fela (Module loc m) = Module loc $ M.mapWithKey (\k _ -> ExportAgain $ parenize k) m
         parenize (L l x) = L l $ "(" ++ x ++ ")"
 
-type EnvS a = SM.StateT ([(LName, Fun)], Env) Compiler a
-
-buildEnv :: Program -> Compiler ([(LName, Fun)], Env)
-buildEnv xs = do
-    e <- defaultEnv
-    SM.execStateT buildEnv' ([], e)
+perform :: Program -> EnvM ()
+perform xs =
+    mapM_ perform' xs
     where
-        buildEnv' = mapM_ perform xs
-
-        perform :: Located ProgramStatement -> EnvS ()
-        perform (L loc (ModuleAssign name mexpr)) = context $ do
+        liftC = EnvM . lift
+    
+        perform' (L loc (ModuleAssign name mexpr)) = context $ do
             m <- eval mexpr
             currentEnv <- SM.gets snd
-            e' <- lift $ case combineEnv (singletonEnv name m) currentEnv of
+            e' <- liftC $ case combineEnv (singletonEnv name m) currentEnv of
                 Left err -> throwAt loc [err]
                 Right x -> return x
             SM.modify $ second (const e')
             where
                 context = withErrorContext $ "When compiling named module " ++ show name ++ " at " ++ show loc
 
-        perform (L loc (ModuleFrom name member mexpr)) = context $ do
+        perform' (L loc (ModuleFrom name member mexpr)) = context $ do
             m <- eval mexpr
-            imports <- lift (moduleImports m)
-            when (not (null imports)) . lift . throwAt loc $
+            imports <- liftC $ moduleImports m
+            when (not (null imports)) . liftC . throwAt loc $
                     ("The following imports were not resolved when compiling entry point " ++ show name)
                     : [ "  " ++ n ++ " :: " ++ show t ++ showSpan loc | (L loc n, t) <- imports ]
             
@@ -145,25 +151,24 @@ buildEnv xs = do
                     | knownSpan sp = " (at " ++ show sp ++ ")"
                     | otherwise = ""
 
-        eval :: Located ModuleDecl -> EnvS Module
         eval (L loc (NamedModule name)) = do
             m <- lookupEnv name <$> SM.gets snd
             maybe (throwAt loc [ "Module " ++ show name ++ " not found" ]) return m
 
         eval (L _ (ModuleDecl exports)) =
-            lift $ singleModule exports
+            liftC $ singleModule exports
 
         eval (L _ (RecursiveModule mexpr)) =
-            lift . iterateModule =<< eval mexpr
+            liftC . iterateModule =<< eval mexpr
 
         eval (L _ (CombinedModule left (L _ "+") right)) =
-            join $ (lift . ) . plusModule <$> eval left <*> eval right
+            join $ (liftC . ) . plusModule <$> eval left <*> eval right
 
         eval (L _ (CombinedModule left (L _ "*") right)) =
-            join $ (lift . ) . composeModule <$> eval left <*> eval right
+            join $ (liftC . ) . composeModule <$> eval left <*> eval right
 
         eval (L _ (CombinedModule left (L _ ":") right)) =
-            join $ (lift . ) . combineModule <$> eval left <*> eval right
+            join $ (liftC . ) . combineModule <$> eval left <*> eval right
 
         eval (L loc (CombinedModule left (L loc' "&") right)) =
             eval (L loc $ RecursiveModule ((L loc $ CombinedModule left (L loc' "+") right)))

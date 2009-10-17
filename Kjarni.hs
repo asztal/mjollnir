@@ -9,7 +9,7 @@ import Control.Monad.Trans (liftIO)
 import Data.Bits ((.&.), (.|.), xor, shiftL, shiftR)
 import Data.Convertible (convert)
 import Data.Int (Int32)
-import Data.Word (Word, Word8, Word16, Word32)
+import Data.Word (Word8, Word16, Word32)
 import System.Exit (exitWith, ExitCode(..))
 import System.Mem (performGC)
 

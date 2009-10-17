@@ -7,17 +7,20 @@ module MValue
     , MonadST (..)
     , ($=), ($~)
     , ($!=), ($!~)
+    , OrdIORef
     , module Control.Monad.ST
     , module Data.IORef
     , module Data.STRef
     , module Data.Array.IO
     ) where
 
+import Control.Monad
 import Control.Monad.Trans
 import Control.Monad.ST
 import Data.Array.IO
 import Data.IORef
 import Data.STRef
+import Data.Unique
 
 -- | A writeable area of memory that may be part of a larger mutable data structure.
 -- | Minimal complete definition readMValue and one of modifyMValue and writeMValue
@@ -56,6 +59,19 @@ data MArrayElem a i e = MArrayElem (a i e) i
 instance (Ix i, MArray a e m) => MValue m (MArrayElem a i e) e where
     readMValue (MArrayElem arr ix) = readArray arr ix
     writeMValue (MArrayElem arr ix) = writeArray arr ix
+
+-- IORefs that are also ordered, so they can be placed in Sets, etc.
+data OrdIORef a = OrdIORef Unique (IORef a) deriving Eq
+
+instance Ord (OrdIORef a) where
+    compare (OrdIORef u _) (OrdIORef v _) = compare u v
+
+instance MonadIO m => MValue m (OrdIORef a) a where
+    readMValue (OrdIORef _ r) = readMValue r
+    writeMValue (OrdIORef _ r) x = writeMValue r x
+
+instance MonadIO m => NewMValue m (OrdIORef a) a where
+    newMValue x = OrdIORef `liftM` liftIO newUnique `ap` newMValue x
 
 ($=), ($!=) :: MValue m r a => r -> a -> m ()
 ($~), ($!~) :: MValue m r a => r -> (a -> a) -> m ()

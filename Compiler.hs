@@ -2,19 +2,21 @@
 
 module Compiler
     ( Compiler
+    , CompilerError
     , runCompiler
     , throwAt
     , checkNameClashes
     , withErrorContext
     , syntaxToExp
     , compileFunction
+    , parseProgram
     , module Located
     , module MValue
     ) where
 
 import Control.Arrow
 import Control.Applicative
-import Control.Monad.Trans (MonadIO)
+import Control.Monad.Trans (MonadIO(..))
 import Control.Monad.Error (MonadError(..), Error(..), ErrorT, runErrorT)
 import Control.Monad
 
@@ -27,10 +29,19 @@ import Data.Map (Map)
 import qualified Data.Map as M
 import Data.Ord
 
+import System.FilePath (takeFileName)
+import System.IO.UTF8 (readFile)
+import Prelude hiding (readFile, putStrLn)
+
 import AST
+import Exp
 import Eval
 import Located
 import MValue
+
+import Text.Parsec.Error
+import Text.Parsec.Pos
+import qualified Parser (parseProgram)
 
 ------------------------------------------------------------------------------
 
@@ -68,6 +79,20 @@ checkNameClashes loc msg xs = case findClashes xs of
         findClashes xs = filter (not . null . tail) . group . sort $ xs
         showClash names = [ "  " ++ unLoc name ++ atLoc name | name <- names ]
 
+parseProgram path = do
+    res <- Parser.parseProgram srcName <$> liftIO (readFile path)
+    case res of
+        Left e -> throwAt (toSpan (errorPos e)) (syntaxError : showParsecError e)
+        Right r -> return r
+    where
+        syntaxError = "Syntax error:"
+        srcName = takeFileName path
+        toSpan pos = join srcSpan (srcLoc srcName (sourceLine pos) (sourceColumn pos))
+
+        showParsecError e = map ("  " ++) . filter (not . null) . lines $ showErrorMessages
+            "or" "unknown parse error" "expecting" "unexpected" "end of file"
+            (errorMessages e)
+
 ------------------------------------------------------------------------------
     
 syntaxToExp :: Map LVarName Int -> Map LVarName Int -> Map LVarName Int -> [LVarName]
@@ -76,7 +101,7 @@ syntaxToExp :: Map LVarName Int -> Map LVarName Int -> Map LVarName Int -> [LVar
 syntaxToExp localIndices argIndices refArgIndices importedVars (L loc expr) =
     context $ case expr of
         LiteralS lit -> return $ transformLiteral lit
-        ListS [] -> return $ ConstE Nil
+        ListS [] -> return NilE
         ListS (x:xs) -> app (withLoc x ":") [] [x, L loc $ ListS xs] -- Location info isn't perfect here.
 
         FunRefS name (L _ arity) -> return $ FunE (NamedFun name arity) arity
@@ -99,12 +124,12 @@ syntaxToExp localIndices argIndices refArgIndices importedVars (L loc expr) =
             CaseE
             <$> recur cond
             <*> mapM toBranch cases
-            <*> maybe (pure (ConstE Nil)) recurs defaultCase
+            <*> maybe (pure NilE) recurs defaultCase
 
         IfS cond thenExp elseIfs otherwiseExp ->
             fold $ (cond, thenExp) : elseIfs
             where
-                fold [] = maybe (pure (ConstE Nil)) recurs otherwiseExp
+                fold [] = maybe (pure NilE) recurs otherwiseExp
                 fold ((cond, thenExp) : rest) = IfE <$> recur cond <*> recurs thenExp <*> fold rest
 
         WhileLoopS cond body -> while cond body
@@ -112,7 +137,7 @@ syntaxToExp localIndices argIndices refArgIndices importedVars (L loc expr) =
         
         LoopS xs -> LoopE . ManyE <$> mapM recur xs
 
-        BlockS [] -> return $ ConstE Nil
+        BlockS [] -> return NilE
         BlockS [x] -> recur x
         BlockS xs -> ManyE <$> mapM recur xs
         
@@ -124,16 +149,16 @@ syntaxToExp localIndices argIndices refArgIndices importedVars (L loc expr) =
     
         recur = syntaxToExp localIndices argIndices refArgIndices importedVars
 
-        recurs [] = return $ ConstE Nil
+        recurs [] = return NilE
         recurs [x] = recur x
         recurs xs = ManyE <$> mapM recur xs
 
         while cond body = do
-            break <- IfE <$> recur cond <*> pure (ConstE Nil) <*> pure BreakE
+            break <- IfE <$> recur cond <*> pure NilE <*> pure BreakE
             LoopE . insertBreak break <$> recurs body
             where
                 insertBreak break (ManyE xs) = ManyE (break : xs)
-                insertBreak break (ConstE Nil) = break
+                insertBreak break NilE = break
                 insertBreak break x = ManyE [break, x]
 
         for inits cond incs body = do
@@ -170,10 +195,10 @@ syntaxToExp localIndices argIndices refArgIndices importedVars (L loc expr) =
 
         possiblyFun name arity = maybe (Right (NamedFun name arity)) Left $ lookupVar name
 
-        transformLiteral (CharLit c) = ConstE $ Word (fromIntegral (ord c))
-        transformLiteral (NatLit i) = ConstE $ Word (fromIntegral i)
-        transformLiteral (IntLit i) = ConstE $ Word (fromIntegral i)
-        transformLiteral (FloatLit f) = ConstE $ Real f
+        transformLiteral (CharLit c) = WordE $ fromIntegral (ord c)
+        transformLiteral (NatLit i) = WordE $ fromIntegral i
+        transformLiteral (IntLit i) = WordE $ fromIntegral i
+        transformLiteral (FloatLit f) = RealE f
         transformLiteral (StringLit xs) = StrE $ let len = length xs in
             listArray (0, len) (fromIntegral len : map (fromIntegral . ord) xs)
 
@@ -208,7 +233,7 @@ compileFunction (L funLoc FunctionDecl {..}) = context $ do
             initExps <- compileInitializers
             return $ simplifyE (ManyE (initExps ++ bodyExps))
 
-        simplifyE (ManyE []) = ConstE Nil
+        simplifyE (ManyE []) = NilE
         simplifyE (ManyE [x]) = x
         simplifyE x = x
 
