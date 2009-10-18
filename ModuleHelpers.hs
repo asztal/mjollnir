@@ -25,10 +25,9 @@ module ModuleHelpers
     , module Module
     ) where
 
-import Control.Applicative ((<$>))
+import Control.Applicative
 import qualified Data.Map as M
 
-import AST (LName)
 import Eval
 import Module
 import Compiler

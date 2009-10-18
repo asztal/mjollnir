@@ -13,7 +13,6 @@ module AST
     , ProgramStatement (..)
       -- * Types
     , module Types
-    , LName, LVarName, LFunName
       -- * AST operations
     , variableDeclNames
     , functionImports
@@ -51,9 +50,6 @@ instance Show Literal where
 
 type LSyntax = Located Syntax
 type Block = [LSyntax]
-type LName = Located Name
-type LVarName = Located VarName
-type LFunName = Located FunName
 
 data Syntax
     = LiteralS Literal

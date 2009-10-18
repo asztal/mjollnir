@@ -20,9 +20,10 @@ import Data.Word (Word16, Word8)
 import Data.Array.Unboxed (Array, listArray, (!))
 import Data.Typeable (Typeable)
 
-import AST
 import Exp
+import Located (atLoc)
 import MValue
+import Types
 
 data WordTag
 data RealTag
@@ -205,14 +206,14 @@ data Fun
     | ResolvedFun Arity (IORef (Function Var Fun))
 
 instance MValue Eval Var Value where
-    readMValue (NamedVar n) = throw $ "Read from NamedVar: " ++ show n
+    readMValue (NamedVar n) = throw $ "Read from NamedVar " ++ show n ++ atLoc n
     readMValue (ResolvedVar r) = readMValue r
     readMValue (ClosedVar a i) = liftIO $ readArray a i
     readMValue (LocalVar i) = liftIO . flip readArray i =<< getsStack localVars
     readMValue (ArgVar i) = liftIO . flip readArray i =<< getsStack arguments
     readMValue (RefArgVar i) = readMValue =<< getsStack ((! i) . refArguments)
 
-    writeMValue (NamedVar n) _ = throw $ "Write to NamedVar: " ++ show n
+    writeMValue (NamedVar n) _ = throw $ "Write to NamedVar " ++ show n ++ atLoc n
     writeMValue (ResolvedVar r) x = writeMValue r x
     writeMValue (ClosedVar a i) x = liftIO $ writeArray a i x
     writeMValue (LocalVar i) x = (\a -> liftIO $ writeArray a i x) =<< getsStack localVars
