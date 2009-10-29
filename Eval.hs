@@ -21,7 +21,7 @@ import Data.Array.Unboxed (Array, listArray, (!))
 import Data.Typeable (Typeable)
 
 import Exp
-import Located (atLoc)
+import Located
 import MValue
 import Types
 
@@ -38,7 +38,7 @@ data Value
     | Real !Double
     | Str (IOUArray Int Word8)
     | Array (IOArray Int Value)
-    | Fun Fun
+    | Fun IFun
     | Pair (IORef Value) (IORef Value)
     | Nil
     deriving Typeable
@@ -102,7 +102,7 @@ instance Convertible Bool Value where
 ------------------------------------------------------------------------------
 
 data StackFrame = StackFrame
-    { refArguments :: Array Int Var
+    { refArguments :: Array Int IVar
     , arguments :: IOArray Int Value
     , localVars :: IOArray Int Value
     }
@@ -118,7 +118,7 @@ data ExecState = ExecState
     , breakCont :: Value -> Eval Value -- the Value should be Nil.
     }
 
-pushStackFrame :: [Var] -> [Value] -> Int -> Eval ()
+pushStackFrame :: [IVar] -> [Value] -> Int -> Eval ()
 pushStackFrame refs args locals = do
     let refsArr = listArray (0,length refs-1) refs
     argsArr <- liftIO $ newListArray (0,length args-1) args
@@ -185,13 +185,13 @@ try x = left errorMessage <$> E.try x
 
 ------------------------------------------------------------------------------
 
-data Var
-    = NamedVar LVarName
-    | ResolvedVar (IORef Value)
-    | ClosedVar (IOArray Int Value) !Int
-    | LocalVar !Int
-    | ArgVar !Int
-    | RefArgVar !Int
+data IVar
+    = INamedVar LName
+    | IResolvedVar (IORef Value)
+    | IClosedVar (IOArray Int Value) !Int
+    | ILocalVar !Int
+    | IArgVar !Int
+    | IRefArgVar !Int    
 
 data Function v f = Function
     { funArity :: Arity
@@ -200,29 +200,29 @@ data Function v f = Function
     , funBody :: Exp v f
     }
 
-data Fun
-    = NamedFun LFunName Arity
-    | NativeFun Arity ([Var] -> [Value] -> Eval Value)
-    | ResolvedFun Arity (IORef (Function Var Fun))
+data IFun
+    = INamedFun LName Arity
+    | INativeFun Arity ([IVar] -> [Value] -> Eval Value)
+    | IResolvedFun (IORef (Function IVar IFun))
 
-instance MValue Eval Var Value where
-    readMValue (NamedVar n) = throw $ "Read from NamedVar " ++ show n ++ atLoc n
-    readMValue (ResolvedVar r) = readMValue r
-    readMValue (ClosedVar a i) = liftIO $ readArray a i
-    readMValue (LocalVar i) = liftIO . flip readArray i =<< getsStack localVars
-    readMValue (ArgVar i) = liftIO . flip readArray i =<< getsStack arguments
-    readMValue (RefArgVar i) = readMValue =<< getsStack ((! i) . refArguments)
+instance MValue Eval IVar Value where
+    readMValue (INamedVar n) = throw $ "Read from INamedVar: " ++ show n ++ atLoc n
+    readMValue (IResolvedVar r) = readMValue r
+    readMValue (IClosedVar a i) = liftIO $ readArray a i
+    readMValue (ILocalVar i) = liftIO . flip readArray i =<< getsStack localVars
+    readMValue (IArgVar i) = liftIO . flip readArray i =<< getsStack arguments
+    readMValue (IRefArgVar i) = readMValue =<< getsStack ((! i) . refArguments)
 
-    writeMValue (NamedVar n) _ = throw $ "Write to NamedVar " ++ show n ++ atLoc n
-    writeMValue (ResolvedVar r) x = writeMValue r x
-    writeMValue (ClosedVar a i) x = liftIO $ writeArray a i x
-    writeMValue (LocalVar i) x = (\a -> liftIO $ writeArray a i x) =<< getsStack localVars
-    writeMValue (ArgVar i) x = (\a -> liftIO $ writeArray a i x) =<< getsStack arguments
-    writeMValue (RefArgVar i) x = flip writeMValue x =<< getsStack ((! i) . refArguments)
+    writeMValue (INamedVar n) _ = throw $ "Write to INamedVar: " ++ show n ++ atLoc n
+    writeMValue (IResolvedVar r) x = writeMValue r x
+    writeMValue (IClosedVar a i) x = liftIO $ writeArray a i x
+    writeMValue (ILocalVar i) x = (\a -> liftIO $ writeArray a i x) =<< getsStack localVars
+    writeMValue (IArgVar i) x = (\a -> liftIO $ writeArray a i x) =<< getsStack arguments
+    writeMValue (IRefArgVar i) x = flip writeMValue x =<< getsStack ((! i) . refArguments)
 
 ------------------------------------------------------------------------------
 
-evalE :: Exp Var Fun -> Eval Value
+evalE :: Exp IVar IFun -> Eval Value
 
 evalE (NilE) = return Nil
 evalE (WordE w) = return (Word w)
@@ -273,11 +273,13 @@ evalE (CaseE scrutinee branches defaultBranch) = do
     
 evalE (IfE cond true false) = ifTrue (evalE cond) (evalE true) (evalE false)
 
-apply :: Fun -> [Var] -> [Value] -> Eval Value
-apply (NamedFun n _) _ _ = throw $ "Application of NamedFun: " ++ show n
-apply (ResolvedFun arity r) refs args = do
-    fun <- readMValue r
+apply :: IFun -> [IVar] -> [Value] -> Eval Value
+apply (IResolvedFun ref) refs args = do
+    fun <- readMValue ref
+    
     let givenArity = (genericLength refs, genericLength args)
+        arity = funArity fun
+
     when (givenArity /= arity) . throw $
         "Function call with wrong argument count: given " ++ show givenArity ++ " instead of " ++ show arity
 
@@ -286,22 +288,24 @@ apply (ResolvedFun arity r) refs args = do
         pushStackFrame refs args (funLocalCount fun)
         evalE (funBody fun)
 
+apply (INamedFun n _) _ _ = throw $ "INamedFun " ++ show n ++ " invoked" ++ atLoc n
+
 -- Arity is ignored here, because functions should call arityError anyway.
-apply (NativeFun _ f) refs args = f refs args
+apply (INativeFun _ f) refs args = f refs args
 
 -- When passing an /expression/ to a function as a ref parameter, its
 -- value has to be determined and then boxed in an IORef. This way,
 -- the function can modify it, but it has no effect on the rest of the program
 -- state.
-evalRefArgs :: [Either (Exp Var Fun) Var] -> Eval [Var]
+evalRefArgs :: [Either (Exp IVar IFun) IVar] -> Eval [IVar]
 evalRefArgs xs = mapM toVar xs
     where
-        toVar (Left e) = ResolvedVar <$> (liftIO . newIORef =<< evalE e)
+        toVar (Left e) = IResolvedVar <$> (liftIO . newIORef =<< evalE e)
         toVar (Right v) = close v
 
-        close (LocalVar i) = ClosedVar <$> getsStack localVars <*> pure i
-        close (ArgVar i) = ClosedVar <$> getsStack arguments <*> pure i
-        close (RefArgVar i) = getsStack ((! i) . refArguments)
+        close (ILocalVar i) = IClosedVar <$> getsStack localVars <*> pure i
+        close (IArgVar i) = IClosedVar <$> getsStack arguments <*> pure i
+        close (IRefArgVar i) = getsStack ((! i) . refArguments)
         close v = return v
 
 ifTrue :: Eval Value -> Eval Value -> Eval Value -> Eval Value

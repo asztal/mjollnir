@@ -1,15 +1,13 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving, FlexibleContexts, RecordWildCards #-}
 
 module Compiler
-    ( Compiler
-    , CompilerError
-    , runCompiler
-    , throwAt
+    ( Compiler, CompilerError, runCompiler
+    , newID
+    , throwAt, panic, withErrorContext
     , checkNameClashes
-    , withErrorContext
-    , syntaxToExp
-    , compileFunction
+    , syntaxToExp, compileFunction
     , parseProgram
+    , module ID
     , module Located
     , module MValue
     ) where
@@ -36,8 +34,10 @@ import Prelude hiding (readFile, putStrLn)
 import AST
 import Exp
 import Eval
+import ID
 import Located
 import MValue
+import Var
 
 import Text.Parsec.Error
 import Text.Parsec.Pos
@@ -71,6 +71,9 @@ withErrorContext ctx action = action `catchError` addCtx where
 throwAt :: MonadError CompilerError m => SrcSpan -> [String] -> m a
 throwAt loc lines = throwError $ CompilerError loc lines []
 
+panic :: SrcSpan -> [String] -> Compiler a
+panic loc msg = throwAt loc ("Internal error:" : msg)
+
 checkNameClashes :: SrcSpan -> String -> [LName] -> Compiler ()
 checkNameClashes loc msg xs = case findClashes xs of
     [] -> return ()
@@ -78,6 +81,9 @@ checkNameClashes loc msg xs = case findClashes xs of
     where
         findClashes xs = filter (not . null . tail) . group . sort $ xs
         showClash names = [ "  " ++ unLoc name ++ atLoc name | name <- names ]
+
+newID :: ID a => Compiler a
+newID = mkID <$> liftIO newUnique
 
 parseProgram path = do
     res <- Parser.parseProgram srcName <$> liftIO (readFile path)
@@ -95,16 +101,17 @@ parseProgram path = do
 
 ------------------------------------------------------------------------------
     
-syntaxToExp :: Map LVarName Int -> Map LVarName Int -> Map LVarName Int -> [LVarName]
+syntaxToExp :: FunR r v f
+            => Map LVarName Int -> Map LVarName Int -> Map LVarName Int -> [LVarName]
             -> Located Syntax
-            -> Compiler (Exp Var Fun)
+            -> Compiler (Exp v f)
 syntaxToExp localIndices argIndices refArgIndices importedVars (L loc expr) =
     context $ case expr of
         LiteralS lit -> return $ transformLiteral lit
         ListS [] -> return NilE
         ListS (x:xs) -> app (withLoc x ":") [] [x, L loc $ ListS xs] -- Location info isn't perfect here.
 
-        FunRefS name (L _ arity) -> return $ FunE (NamedFun name arity) arity
+        FunRefS name (L _ arity) -> return $ FunE (mkNamedFun name arity) arity
         VarRefS name -> ReadE <$> lookupVarD name
 
         GetterS a is -> recur . L loc $ OperatorCallS (withLoc a $ "fylkissækja" ++ show (length is)) (a:is)
@@ -184,16 +191,16 @@ syntaxToExp localIndices argIndices refArgIndices importedVars (L loc expr) =
             maybe (tryImport name) return $ lookupVar name
 
         tryImport name
-            | name `elem` importedVars = return $ NamedVar name
+            | name `elem` importedVars = return $ mkNamedVar name
             | otherwise = throwAt (getLoc name) [ "Unbound variable " ++ show name ++ " used (did you mean to import it?)" ]
 
         lookupVar name = msum $ zipWith find
                 [localIndices, argIndices, refArgIndices]
-                [LocalVar, ArgVar, RefArgVar]
+                [mkLocalVar, mkArgVar, mkRefArgVar]
             where
                 find vars constr = constr <$> M.lookup name vars
 
-        possiblyFun name arity = maybe (Right (NamedFun name arity)) Left $ lookupVar name
+        possiblyFun name arity = maybe (Right (mkNamedFun name arity)) Left $ lookupVar name
 
         transformLiteral (CharLit c) = WordE $ fromIntegral (ord c)
         transformLiteral (NatLit i) = WordE $ fromIntegral i
@@ -213,7 +220,7 @@ syntaxToExp localIndices argIndices refArgIndices importedVars (L loc expr) =
         literalAsWord16 (NatLit i) = fromIntegral i
         literalAsWord16 _ = error "Literal in case range wasn't CharLit/NatLit"
 
-compileFunction :: Located FunctionDecl -> Compiler (Function Var Fun)
+compileFunction :: FunR r v f => Located FunctionDecl -> Compiler (Function v f)
 compileFunction (L funLoc FunctionDecl {..}) = context $ do
     checkVarNames $ fnInOutParams ++ fnInParams ++ concatMap variableDeclNames fnVariables
 
@@ -240,7 +247,7 @@ compileFunction (L funLoc FunctionDecl {..}) = context $ do
         -- Convert the initializer list to a list of statements to be inserted
         -- before the function body.
         compileInitializers = catMaybes <$> (sequence $ zipWith f [0..] allLocals) where
-            f i (_, Just init) = Just . WriteE (LocalVar i) <$> toExp init
+            f i (_, Just init) = Just . WriteE (mkLocalVar i) <$> toExp init
             f _ (_, Nothing) = return Nothing
 
         (allLocals, importedVars) = (concat *** concat) . partitionEithers $ map f fnVariables where

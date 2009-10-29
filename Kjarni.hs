@@ -18,7 +18,7 @@ import Prelude hiding (readFile, putStrLn)
 
 import ModuleHelpers
 
-kjarni, ut, snua, strengir, skrifalin :: Compiler Module
+kjarni, ut, snua, strengir, skrifalin :: Compiler IModule
 
 inn = simpleModule "INN"
     [ unimplemented "lesa" (0,0)
@@ -494,7 +494,7 @@ word :: Value -> Eval Word16
 word32 :: Value -> Eval Word32
 signed32 :: Value -> Eval Int32
 real :: Value -> Eval Double
-wordBinOp :: (Value -> Eval Int) -> (Int -> Int -> Int) -> T0 Var -> T2 Value -> Eval Value
+wordBinOp :: (Value -> Eval Int) -> (Int -> Int -> Int) -> T0 IVar -> T2 Value -> Eval Value
 
 signed (Word x) = let i = fromIntegral x :: Int
     in return $ if i > 32767 then i - 65536 else i
@@ -546,12 +546,11 @@ compareFloats = compareValuesBy real
 
 funArityBy selector T0 (T1 x) = do
     f <- stef x
-    let count = selector $
-            case f of
-                NamedFun _ ar -> ar
-                NativeFun ar _ -> ar
-                ResolvedFun ar _ -> ar
-    return . Word $ fromIntegral count
+    Word . fromIntegral . selector <$> getArity f
+    where
+        getArity (INamedFun _ ar) = return ar
+        getArity (INativeFun ar _) = return ar
+        getArity (IResolvedFun r) = funArity <$> readMValue r
 
 ------------------------------------------------------------------------------
 

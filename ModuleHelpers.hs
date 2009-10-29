@@ -2,23 +2,11 @@
 
 module ModuleHelpers
     ( simpleModule
-    , var
-    , fun
-    , fun'
-    , unimplemented
-    , NativeFun
-    , Args
-    , T0(T0)
-    , T1(T1)
-    , T2(T2)
-    , T3(T3)
-    , T4(T4)
-    , T5(T5)
-    , T6(T6)
-    , T7(T7)
-    , T8(T8)
-    , T9(T9)
-    , T10(T10)
+    , IModule, IExport
+    , var, fun, fun', unimplemented
+    , NativeFun, Args
+    , T0(T0), T1(T1), T2(T2), T3(T3), T4(T4)
+    , T5(T5), T6(T6), T7(T7), T8(T8), T9(T9), T10(T10)
     , module Eval
     , module Compiler
     , module Types
@@ -33,24 +21,28 @@ import Module
 import Compiler
 import Types
 import Located
+import Var
 
-type NativeFun = [Var] -> [Value] -> Eval Value
+type IExport = Export (IORef Value) IFun
+type IModule = Module (IORef Value) IVar IFun
+type NativeFun = [IVar] -> [Value] -> Eval Value
 
-simpleModule :: Name -> [Compiler (LName, Export)] -> Compiler Module
+simpleModule :: FunR r v f => Name -> [Compiler (LName, Export r f)] -> Compiler (Module r v f)
 simpleModule name exports = Module (unknownSpan $ "module \"" ++ name ++ "\"") . M.fromList <$> sequence exports
 
-var :: Name -> Compiler (LName, Export)
+var :: Name -> Compiler (LName, IExport)
 var name = (,) (genLoc name) . ExportVar <$> newMValue Nil
 
-unimplemented :: Name -> Arity -> Compiler (LName, Export)
+unimplemented :: Name -> Arity -> Compiler (LName, IExport)
 unimplemented name _ = 
-    return (genLoc name, ExportNative (-1, -1) func) where
+    return (genLoc name, ExportFun (INativeFun (-1, -1) func)) where
         func _ _ = throw $ "Unimplemented function used: " ++ name
 
 class Args t where
     args :: [a] -> t a
     argCount :: t a -> Integer
 
+-- Feel the power of Haskell. Actually, I'm just too lazy to learn Template Haskell.
 data T0 a = T0
 data T1 a = T1 a
 data T2 a = T2 a a
@@ -119,12 +111,12 @@ instance Args T10 where
     args _ = error "Expected 10 arguments"
     argCount _ = 10
 
-fun :: forall io i. (Args io, Args i) => Name -> (io Var -> i Value -> Eval Value) -> Compiler (LName, Export)
+fun :: forall io i. (Args io, Args i) => Name -> (io IVar -> i Value -> Eval Value) -> Compiler (LName, IExport)
 fun name body = do
     let inArity = argCount (undefined :: i Value)
-        inoutArity = argCount (undefined :: io Var)
+        inoutArity = argCount (undefined :: io IVar)
         func io i = body (args io) (args i)
-    return (genLoc name, ExportNative (inoutArity, inArity) func)
+    return (genLoc name, ExportFun (INativeFun (inoutArity, inArity) func))
 
-fun' :: Name -> Arity -> NativeFun -> Compiler (LName, Export)
-fun' name arity body = return (genLoc name, ExportNative arity body)
+fun' :: Name -> Arity -> NativeFun -> Compiler (LName, IExport)
+fun' name arity body = return (genLoc name, ExportFun (INativeFun arity body))

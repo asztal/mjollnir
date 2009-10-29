@@ -2,12 +2,13 @@
 
 module Exp
     ( Exp(..)
+    , modifyExp
     , modifyExpM
     , flattenExp
     , references
     ) where
 
-import Control.Applicative
+import Control.Monad.Identity
 import Data.Array.Unboxed
 import Data.Either
 import Data.Word (Word8, Word16)
@@ -28,7 +29,7 @@ data Exp var fun
     | FunE fun Arity
     | ReadE var
     | WriteE var (Exp var fun)
-    | AppE (Either var fun) ![Either (Exp var fun) var] ![Exp var fun]
+    | AppE (Either var fun) [Either (Exp var fun) var] [Exp var fun]
     | ManyE [Exp var fun]
 
     -- These are still necessary terms, due to their short-circuiting behaviour.
@@ -47,7 +48,7 @@ data Exp var fun
     | IfE (Exp var fun) (Exp var fun) (Exp var fun)
     deriving Typeable
 
-modifyExpM :: (Applicative m, Monad m) => (Exp v f -> m (Exp v f)) -> Exp v f -> m (Exp v f)
+modifyExpM :: Monad m => (Exp v f -> m (Exp v f)) -> Exp v f -> m (Exp v f)
 modifyExpM f e = f =<< case e of
     WriteE v x -> WriteE <$> pure v <*> recur x
     AppE vf refs args -> AppE vf <$> mapM recurRefArg refs <*> recurs args
@@ -66,6 +67,16 @@ modifyExpM f e = f =<< case e of
         recurRefArg (Left x) = Left <$> recur x
         recurRefArg y = return y
         recurCase (ranges, x) = (,) ranges <$> recur x
+
+        infixl 4 <$>
+        (<$>) = liftM
+        infixl 4 <*>
+        (<*>) = ap
+        pure = return
+        
+
+modifyExp :: (Exp v f -> Exp v f) -> Exp v f -> Exp v f
+modifyExp f = runIdentity . modifyExpM (Identity . f)
 
 references :: Exp v f -> ([v], [f])
 references = partitionEithers . concatMap g . flattenExp where
@@ -90,3 +101,4 @@ flattenExp e = (e :) . concatMap flattenExp $ case e of
     CaseE x cases d -> x : d : map snd cases
     IfE x y z -> [x,y,z]
     _ -> []
+

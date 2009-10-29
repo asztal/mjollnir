@@ -24,33 +24,34 @@ import Located
 import Module
 import MValue
 import Kjarni
+import Var
 
 ------------------------------------------------------------------------------
 
-newtype Env = Env (Map LName Module)
+newtype Env r v f = Env (Map LName (Module r v f))
 
 ------------------------------------------------------------------------------
 
-emptyEnv :: Env
+emptyEnv :: Env r v f
 emptyEnv = Env M.empty
 
-singletonEnv :: LName -> Module -> Env
+singletonEnv :: LName -> Module r v f -> Env r v f
 singletonEnv n m = Env (M.singleton n m)
 
-combineEnv :: Env -> Env -> Either String Env
+combineEnv :: Env r v f -> Env r v f -> Either String (Env r v f)
 combineEnv (Env left) (Env right)
     | (x:_) <- M.keys (M.intersection left right)
         = throwError $ "Top-level environment already has a module named " ++ show x
     | otherwise
         = return . Env $ M.union left right
 
-lookupEnv :: LName -> Env -> Maybe Module
+lookupEnv :: LName -> Env r v f -> Maybe (Module r v f)
 lookupEnv name (Env e) = M.lookup name e
 
 ------------------------------------------------------------------------------
 
-newtype EnvM a = EnvM (SM.StateT ([(LName, Fun)], Env) Compiler a)
-    deriving (MonadIO, Monad, Functor, Applicative, MonadError CompilerError, SM.MonadState ([(LName, Fun)], Env))
+newtype EnvM r v f a = EnvM (SM.StateT ([(LName, f)], Env r v f) Compiler a)
+    deriving (MonadIO, Monad, Functor, Applicative, MonadError CompilerError, SM.MonadState ([(LName, f)], Env r v f))
 
 runDefaultEnv (EnvM m) = do
     e <- defaultEnv
@@ -60,7 +61,7 @@ runEnv e (EnvM m) = SM.execStateT m ([], e)
 
 ------------------------------------------------------------------------------
 
-defaultEnv :: Compiler Env
+defaultEnv :: Compiler (Env (IORef Value) IVar IFun)
 defaultEnv = context $ do
     [ kjarni, ut, strengir, snua, skrifalin, lesalinu, inn ] <- sequence
         [ double <$> kjarni, ut, strengir, snua, skrifalin, lesalinu, inn ]
@@ -104,7 +105,7 @@ defaultEnv = context $ do
         fela (Module loc m) = Module loc $ M.mapWithKey (\k _ -> ExportAgain $ parenize k) m
         parenize (L l x) = L l $ "(" ++ x ++ ")"
 
-perform :: Program -> EnvM ()
+perform :: FunR r v f => Program -> EnvM r v f ()
 perform xs =
     mapM_ perform' xs
     where
@@ -132,10 +133,7 @@ perform xs =
                      [ "Undeclared function bound by top-level program declaration " ++
                        show name ++ ": " ++ show member
                      ]
-                Just (ExportNative arity fun) -> SM.modify $ first ((name, NativeFun arity fun) :)
-                Just (ExportFun ref) -> do
-                    fun <- readMValue ref
-                    SM.modify $ first ((name, ResolvedFun (funArity fun) ref) :)
+                Just (ExportFun fun) -> SM.modify $ first ((name, fun) :)
                 Just (ExportVar _) -> throwAt (getLoc member)
                     [ "Error: variable " ++ show member ++
                       " was bound to top-level program declaration " ++ show name
