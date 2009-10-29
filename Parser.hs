@@ -285,9 +285,9 @@ segðaruna = loc segð `sepEndBy` comma
 
 -- | This pretty much corresponds to anything you can put after \\haus etc.
 -- I kind of expected to need "try" here. Apparently not though.
--- TODO: Check order of tala and operator. "-1" is being parsed as a unary operator call.
 smásegð :: P Syntax
-smásegð =  nafnsegð
+smásegð =  LiteralS <$> tala
+       <|> nafnsegð
        <|> operator
        <|> efsegð
        <|> (ListS <$> squareBrackets segðaruna <?> "list literal")
@@ -298,7 +298,6 @@ smásegð =  nafnsegð
        <|> ReturnS <$ reserved "skila" <*> loc segð
        <|> brackets segð
        <|> LiteralS <$> StringLit <$> strengur
-       <|> LiteralS <$> tala
        <|> funcRef
        <?> "expression"
     where
