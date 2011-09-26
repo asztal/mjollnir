@@ -202,7 +202,7 @@ data Function v f = Function
 
 data IFun
     = INamedFun LName Arity
-    | INativeFun Arity ([IVar] -> [Value] -> Eval Value)
+    | INativeFun Name Arity ([IVar] -> [Value] -> Eval Value)
     | IResolvedFun (IORef (Function IVar IFun))
 
 instance MValue Eval IVar Value where
@@ -291,7 +291,15 @@ apply (IResolvedFun ref) refs args = do
 apply (INamedFun n _) _ _ = throw $ "INamedFun " ++ show n ++ " invoked" ++ atLoc n
 
 -- Arity is ignored here, because functions should call arityError anyway.
-apply (INativeFun _ f) refs args = f refs args
+apply (INativeFun name _ f) refs args = do
+    -- This simple exception handling code at least gives some idea
+    -- as to where the error occurred.
+    -- This technique resets the execution state within the call to f,
+    -- but that shouldn't matter.
+    x <- liftIO $ runEval (f refs args)
+    case x of 
+        Left msg -> throw $ name ++ ": " ++ msg
+        Right x -> return x
 
 -- When passing an /expression/ to a function as a ref parameter, its
 -- value has to be determined and then boxed in an IORef. This way,

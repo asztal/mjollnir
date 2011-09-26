@@ -546,7 +546,7 @@ funArityBy selector T0 (T1 x) = do
     Word . fromIntegral . selector <$> getArity f
     where
         getArity (INamedFun _ ar) = return ar
-        getArity (INativeFun ar _) = return ar
+        getArity (INativeFun _ ar _) = return ar
         getArity (IResolvedFun r) = funArity <$> readMValue r
 
 ------------------------------------------------------------------------------

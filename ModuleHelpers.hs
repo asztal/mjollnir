@@ -34,7 +34,7 @@ var name = (,) (genLoc name) . ExportVar <$> newMValue Nil
 
 unimplemented :: Name -> Arity -> Compiler (LName, IExport)
 unimplemented name _ = 
-    return (genLoc name, ExportFun (INativeFun (-1, -1) func)) where
+    return (genLoc name, ExportFun (INativeFun name (-1, -1) func)) where
         func _ _ = throw $ "Unimplemented function used: " ++ name
 
 class Args t where
@@ -115,7 +115,7 @@ fun name body = do
     let inArity = argCount (undefined :: i Value)
         inoutArity = argCount (undefined :: io IVar)
         func io i = body (args io) (args i)
-    return (genLoc name, ExportFun (INativeFun (inoutArity, inArity) func))
+    return (genLoc name, ExportFun (INativeFun name (inoutArity, inArity) func))
 
 fun' :: Name -> Arity -> NativeFun -> Compiler (LName, IExport)
-fun' name arity body = return (genLoc name, ExportFun (INativeFun arity body))
+fun' name arity body = return (genLoc name, ExportFun (INativeFun name arity body))

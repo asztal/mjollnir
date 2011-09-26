@@ -91,7 +91,7 @@ instance FunR (IORef Value) IVar IFun where
 
     viewFun (INamedFun n a) = VNamedFun n a
     viewFun (IResolvedFun r) = VResolvedFun r
-    viewFun (INativeFun a f) = VNativeFun a f
+    viewFun (INativeFun _ a f) = VNativeFun a f
 
 getFunArity :: (FunR r v f, MonadIO m) => f -> m Arity
 getFunArity f = case viewFun f of
