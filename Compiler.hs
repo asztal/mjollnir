@@ -28,8 +28,6 @@ import qualified Data.Map as M
 import Data.Ord
 
 import System.FilePath (takeFileName)
-import System.IO.UTF8 (readFile)
-import Prelude hiding (readFile, putStrLn)
 
 import AST
 import Exp

@@ -20,7 +20,6 @@ import Eval
 import Module
 import Compiler
 import Types
-import Located
 import Var
 
 type IExport = Export (IORef Value) IFun

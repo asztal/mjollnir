@@ -36,7 +36,6 @@ import AST
 import Exp
 import Eval
 import Compiler
-import Located
 import Var
 
 import Prelude hiding (init)

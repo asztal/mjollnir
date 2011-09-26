@@ -20,9 +20,7 @@ import Data.Map (Map)
 import AST
 import Compiler
 import Eval
-import Located
 import Module
-import MValue
 import Kjarni
 import Var
 

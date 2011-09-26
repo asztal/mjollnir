@@ -3,17 +3,16 @@ module Main where
 import Data.List
 import Data.Ord
 
+-- Seems the default System.Environment.getProgName doesn't do conversion.
 import System.Environment.UTF8 (getArgs, getProgName)
-import System.IO (stderr)
 import System.FilePath (takeFileName)
-import System.IO.UTF8 (putStrLn, hPutStrLn)
-import Prelude hiding (readFile, putStrLn)
+import System.IO (stderr, hPutStrLn)
+import Prelude
 
 import Compiler
 import Eval
 import Env
 import Exp
-import Located
 
 -- TODO: Use a library made for this. This is just temporary.
 main = do

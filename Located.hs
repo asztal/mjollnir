@@ -98,9 +98,9 @@ knownSpan (UnknownSpan _) = False
 knownSpan _ = True
 
 instance Show SrcSpan where
-    show (OneLine src row col col') =
+    show (OneLine src row col _) =
         src ++ ":" ++ show row ++ ":" ++ show col -- ++ "-" ++ show col'
-    show (MultiLine src row col row' col') =
+    show (MultiLine src row col _ _) =
         src ++ ":" ++ show row ++ ":" ++ show col -- ++ "-" ++ show row' ++ ":" ++ show col'
     show (Point src row col) =
         src ++ ":" ++ show row ++ ":" ++ show col

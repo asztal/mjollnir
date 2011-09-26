@@ -13,9 +13,6 @@ import Data.Word (Word8, Word16, Word32)
 import System.Exit (exitWith, ExitCode(..))
 import System.Mem (performGC)
 
-import System.IO.UTF8 (putStrLn)
-import Prelude hiding (readFile, putStrLn)
-
 import ModuleHelpers
 
 kjarni, ut, snua, strengir, skrifalin :: Compiler IModule
