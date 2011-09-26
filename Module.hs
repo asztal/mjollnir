@@ -90,11 +90,6 @@ debugModule, debugExports, debugImports :: FunR r v f => Name -> Module r v f ->
 moduleImports :: FunR r v f => Module r v f -> Compiler [(LName, ImportType)]
 singleModule :: FunR r v f => Located [(LName, ExportDecl)] -> Compiler (Module r v f)
 
--- Stupid mtl lacking basic instances.
-instance (Monad f, Applicative f) => Applicative (SM.StateT s f) where
-    pure = return
-    (<*>) = ap
-
 
 graphNodes m = do
     let roots = scannableExports (M.elems m)
