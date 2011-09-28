@@ -102,8 +102,8 @@ graphNodes m = do
                 let refs = scannableRefs (references (funBody fun))
                 mapM_ scan refs
 
-        scannableExports es = [ ref | ExportFun (viewFun -> VResolvedFun ref) <- es ]
-        scannableRefs (_, fs) = [ ref | VResolvedFun ref <- map viewFun fs ]
+        scannableExports es = [ ref | ExportFun (viewFun -> VResolvedFun _ ref) <- es ]
+        scannableRefs (_, fs) = [ ref | VResolvedFun _ ref <- map viewFun fs ]
 
 lookupExport name (Module _ m) = M.lookup name m
 
@@ -242,16 +242,16 @@ cloneModule (Module loc oldExports) = do
 
     return $ Module loc newExports
     where
-        updateExport assocs (ExportFun (viewFun -> VResolvedFun ref)) = case lookup ref assocs of
-            Nothing -> ExportFun (mkResolvedFun ref)
-            Just ref' -> ExportFun (mkResolvedFun ref')
+        updateExport assocs (ExportFun (viewFun -> VResolvedFun name ref)) = case lookup ref assocs of
+            Nothing -> ExportFun (mkResolvedFun name ref)
+            Just ref' -> ExportFun (mkResolvedFun name ref')
         updateExport _ x = x
     
         cloneNode ref = do
             ref' <- newMValue =<< readMValue ref
             return (ref, ref')
 
-        rewritableExports xs = [ ref | ExportFun (viewFun -> VResolvedFun ref) <- xs ]
+        rewritableExports xs = [ ref | ExportFun (viewFun -> VResolvedFun _ ref) <- xs ]
 
         rewriteExports assocs refs = forM_ refs $ \ref-> do
             fun <- readMValue ref
@@ -266,9 +266,9 @@ cloneModule (Module loc oldExports) = do
             f (AppE (Right fun) refs args) = AppE <$> (Right <$> rewriteF fun) <*> pure refs <*> pure args
             f x = return x
 
-            rewriteF (viewFun -> VResolvedFun ref) = case lookup ref assocs of
-                Nothing -> mkResolvedFun ref <$ rewriteExports assocs [ref]
-                Just ref' -> mkResolvedFun ref' <$ rewriteExports assocs [ref']
+            rewriteF (viewFun -> VResolvedFun name ref) = case lookup ref assocs of
+                Nothing -> mkResolvedFun name ref <$ rewriteExports assocs [ref]
+                Just ref' -> mkResolvedFun name ref' <$ rewriteExports assocs [ref']
             rewriteF x = return x
 
 -- Adds two modules. If there are duplicate exports, an error is raised.
@@ -339,7 +339,7 @@ moduleImports (Module _ m) =
         imports (ExportAgain n) = return [(n, ImportAny)]
         imports (ExportFun fun) = do
             case viewFun fun of
-                VResolvedFun ref -> do
+                VResolvedFun _ ref -> do
                     seen <- SM.get
                     if ref `elem` seen
                         then return []
@@ -368,7 +368,7 @@ moduleImports (Module _ m) =
                 -- already been scanned for imports.
                 g x = case viewFun x of
                     VNamedFun name arity -> return $ Right [(name, ImportFun arity)]
-                    VResolvedFun ref -> do
+                    VResolvedFun _ ref -> do
                         seen <- SM.get
                         if ref `elem` seen
                             then return (Left [])
@@ -376,7 +376,7 @@ moduleImports (Module _ m) =
                                 SM.modify (ref:)
                                 fun' <- readMValue ref
                                 return $ Left [fun']
-                    VNativeFun _ _ -> return $ Right []
+                    VNativeFun _ _ _ -> return $ Right []
 
 -- Converts a module declaration to a Module. A module declaration has only
 -- unresolved imports.
@@ -394,7 +394,7 @@ singleModule (L declLoc decls) = do
             f name (ExportFunDecl decl) = do
                 compiled <- compileFunction decl
                 ref <- newMValue compiled
-                return (name, ExportFun (mkResolvedFun ref))
+                return (name, ExportFun (mkResolvedFun (unLoc name) ref))
             f name ExportVarDecl = do
                 ref <- liftIO newResolvedVar
                 return (name, ExportVar ref)

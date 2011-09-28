@@ -25,14 +25,6 @@ import Located
 import MValue
 import Types
 
-data WordTag
-data RealTag
-data StrTag
-data ArrayTag
-data FunTag
-data PairTag
-data NilTag
-
 data Value
     = Word !Word16
     | Real !Double
@@ -203,7 +195,7 @@ data Function v f = Function
 data IFun
     = INamedFun LName Arity
     | INativeFun Name Arity ([IVar] -> [Value] -> Eval Value)
-    | IResolvedFun (IORef (Function IVar IFun))
+    | IResolvedFun Name (IORef (Function IVar IFun))
 
 instance MValue Eval IVar Value where
     readMValue (INamedVar n) = throw $ "Read from INamedVar: " ++ show n ++ atLoc n
@@ -274,14 +266,14 @@ evalE (CaseE scrutinee branches defaultBranch) = do
 evalE (IfE cond true false) = ifTrue (evalE cond) (evalE true) (evalE false)
 
 apply :: IFun -> [IVar] -> [Value] -> Eval Value
-apply (IResolvedFun ref) refs args = do
+apply (IResolvedFun name ref) refs args = do
     fun <- readMValue ref
     
     let givenArity = (genericLength refs, genericLength args)
         arity = funArity fun
 
     when (givenArity /= arity) . throw $
-        "Function call with wrong argument count: given " ++ show givenArity ++ " instead of " ++ show arity
+        "Function call to " ++ name ++ " : given " ++ show givenArity ++ " argument(s) instead of " ++ show arity
 
     -- Set the return continuation.
     callCCWithState (\newReturnCont st -> st { returnCont = newReturnCont }) $ do

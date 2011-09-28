@@ -547,7 +547,7 @@ funArityBy selector T0 (T1 x) = do
     where
         getArity (INamedFun _ ar) = return ar
         getArity (INativeFun _ ar _) = return ar
-        getArity (IResolvedFun r) = funArity <$> readMValue r
+        getArity (IResolvedFun _ r) = funArity <$> readMValue r
 
 ------------------------------------------------------------------------------
 
