@@ -42,7 +42,21 @@ data Instruction label
     | JumpI label
     | ConditionalI CVar label
     | CallI (Maybe CVar) CFun [CVar] [CVar]
-    | CallVI (Maybe CVar) CVar [CVar] [CVar] 
+    | CallVI (Maybe CVar) CVar [CVar] [CVar]
+    
+    -- Used for computing addresses for passing a variable with
+    -- reference semantics, e.g.
+    --   staðvær x
+    --   f(x;),
+    --   skrifa(;x),
+    -- would become something like
+    --   LoadAddressI (CStackVar Direct 1) (CStackVar Direct 0)
+    --   CallI Nothing f [CStackVar Direct 1] []
+    --   CallI Nothing skrifa [] [CStackVar Direct 0]
+    | LoadAddressI CVar CVar
+    
+    -- For testing ranges in case expressions
+    | InRangeI CVar CVar Word16 Word16
     deriving (Show)
 
 newtype Label s = Label (STRef s Int) 
@@ -54,14 +68,20 @@ data GenState s = GenState
     { gsInstructions :: S.Seq (Instruction (Label s)) 
     , gsBreakLabel :: Maybe (Label s)
     , gsReturnLabel :: Label s
+    , gsStackIndex :: Int
+    , gsRetVal :: CVar
     }
     
 runGenIR :: (forall s. GenIR s a) -> [Instruction Int]
 runGenIR x = runST (do
     end <- Label <$> newSTRef (-1)
     gs <- execStateT
-        (unGenIR (x >> defineLabel end))
-        (GenState S.empty Nothing end)
+        (unGenIR (do
+            rv <- stackVar
+            modify $ \gs -> gs { gsRetVal = rv }
+            x
+            defineLabel end))
+        (GenState S.empty Nothing end 0 undefined)
     mapM resolveLabel (F.toList (gsInstructions gs)))
 
 resolveLabel :: Instruction (Label s) -> ST s (Instruction Int)
@@ -75,6 +95,7 @@ resolveLabel (AssignI u v) = return $ AssignI u v
 resolveLabel (CallI r f vs vs') = return $ CallI r f vs vs'
 resolveLabel (CallVI r v vs vs') = return $ CallVI r v vs vs'
 
+-- This linearises the expression, but does not put it into SSA form.
 generateIR :: CVar -> Exp CVar CFun -> GenIR s ()
 generateIR output expr = case expr of
     NilE -> do
@@ -153,19 +174,59 @@ generateIR output expr = case expr of
             -- TODO: add error handling to GenIR?
             Nothing -> error "\"út\" outside of loop"
             Just l -> write $ JumpI l
-    
-    -- TODO: IfE/CaseE    
+            
+    IfE cond x y -> do
+        cond' <- stackVar
+        condTrue <- label
+        end <- label
+        generateIR cond' cond
+        write $ ConditionalI cond' condTrue
+        generateIR output y
+        write $ JumpI end 
+        defineLabel condTrue
+        generateIR output x
+        defineLabel end  
+        
+    CaseE scrutinee branches defaultBranch -> do
+        scrutinee' <- stackVar
+        generateIR scrutinee' scrutinee
+        
+        defaultBranchLabel <- label
+        end <- label
+        labels <- forM branches (\branch -> (,) <$> label <*> pure branch)
+        
+        -- Emit the code that selects the correct branch.
+        ir <- stackVar
+        forM_ labels $ \(label, (ranges, body)) -> do
+            forM_ ranges $ \(low, high) -> do
+                write $ InRangeI ir scrutinee' low high
+                write $ ConditionalI ir label
+        
+        write $ JumpI defaultBranchLabel
+        
+        -- Now emit the IR for each branch.
+        forM labels $ \(label, (_ranges, body)) -> do
+            defineLabel label
+            generateIR output body
+            write $ JumpI end
+            
+        defineLabel defaultBranchLabel
+        generateIR output defaultBranch
+        
+        defineLabel end
+        
     _ -> return ()
     
     where
-        -- TODO: this should change local var references to 
-        -- closure references (for Right cases).
         evalRefArg :: Either (Exp CVar CFun) CVar -> GenIR s CVar
-        evalRefArg (Right var) = return var
+        evalRefArg (Right var) = do
+            addr <- stackVar
+            write $ LoadAddressI addr var 
+            return addr
         evalRefArg (Left arg) = do
             x <- stackVar
             generateIR x arg
-            return x
+            evalRefArg (Right x)
         
         evalValArg :: Exp CVar CFun -> GenIR s CVar 
         evalValArg arg = do
@@ -185,16 +246,18 @@ label :: GenIR s (Label s)
 label = GenIR . lift $ (Label <$> newSTRef (-1))
 
 stackVar :: GenIR s CVar
-stackVar = return (CNamedVar (genLoc "<stackVar>"))
+stackVar = do
+    i <- gets gsStackIndex
+    modify $ \gs -> gs { gsStackIndex = succ i }
+    return $ CStackVar Direct i
 
 retVal :: GenIR s CVar
-retVal = return (CNamedVar (genLoc "<retVal>"))
+retVal = gets gsRetVal
 
 write :: Instruction (Label s) -> GenIR s ()
 write instr = GenIR . modify $ \ gs -> 
     gs { gsInstructions = gsInstructions gs S.|> instr }
 
--- TODO: get the current writer position and use that.
 defineLabel :: Label s -> GenIR s ()
 defineLabel (Label r) = do
     instrs <- GenIR $ gets gsInstructions
@@ -214,3 +277,4 @@ branchTest = do
     defineLabel skip
     write $ CallI Nothing (CNamedFun (genLoc "puts") (0,1)) [] [CLocalVar 2]
     defineLabel end
+

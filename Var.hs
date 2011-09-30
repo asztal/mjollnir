@@ -3,7 +3,7 @@
              FlexibleInstances #-}
 
 module Var (
-    CVar(..), CFun(..), CVarID,
+    CVar(..), CFun(..), CVarID, AddressingMode(..),
     VarR(..), FunR(..), newResolvedVar,
     VarView(..), FunView(..), getFunArity, funName
     ) where
@@ -110,14 +110,20 @@ funName f = case viewFun f of
 newtype CVarID = CVarID Unique deriving (ID, Ord, Eq)
 instance Show CVarID where show x = "<CVarID>"
 
+data AddressingMode
+    = Direct
+    | Indirect
+    deriving Show
+
 data CVar
     = CNamedVar LName
     | CLocalVar Int
     | CArgVar Int
     | CRefArgVar Int
     | CModuleVar CVarID
+    | CStackVar AddressingMode Int  
     deriving Show
-
+    
 data CFun
     = CNamedFun LName Arity
     | CFun (IORef (Function CVar CFun))
