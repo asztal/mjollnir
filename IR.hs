@@ -1,18 +1,19 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving, DeriveFunctor,
              RankNTypes #-}
 
-module IR {-(
+module IR (
     Instruction(..),
-    generateIR
-    ) -}where
+    compileToIR,
+    varRefs
+    ) where
 
 import Control.Applicative
-import Control.Monad (mapM, ap)
 import Control.Monad.ST
 import Control.Monad.State
 import qualified Data.Array.Unboxed
 import Data.Char (chr)
 import qualified Data.Foldable as F
+import Data.Maybe (maybeToList)
 import qualified Data.Sequence as S
 import Data.STRef
 import Data.Word (Word16)
@@ -44,6 +45,9 @@ data Instruction label
     | CallI (Maybe CVar) CFun [CVar] [CVar]
     | CallVI (Maybe CVar) CVar [CVar] [CVar]
     
+    -- Corresponds to x := stef f (0;2)
+    | LoadFunI CVar CFun Arity
+    
     -- Used for computing addresses for passing a variable with
     -- reference semantics, e.g.
     --   staðvær x
@@ -59,6 +63,20 @@ data Instruction label
     | InRangeI CVar CVar Word16 Word16
     deriving (Show)
 
+varRefs :: Instruction a -> [CVar]
+varRefs (NilI v) = [v]
+varRefs (WordI v _) = [v]
+varRefs (RealI v _) = [v]
+varRefs (StringI v _) = [v]
+varRefs (AssignI u v) = [u,v]
+varRefs (ConditionalI v _) = [v]
+varRefs (CallI rv _ vs vs') = maybeToList rv ++ vs ++ vs'
+varRefs (CallVI rv v vs vs') = v:(maybeToList rv ++ vs ++ vs')
+varRefs (LoadFunI v _ _)  = [v]
+varRefs (LoadAddressI u v) = [u,v]
+varRefs (InRangeI u v _ _) = [u,v]
+varRefs _ = []
+
 newtype Label s = Label (STRef s Int) 
 
 newtype GenIR s a = GenIR { unGenIR :: StateT (GenState s) (ST s) a } 
@@ -72,7 +90,7 @@ data GenState s = GenState
     , gsRetVal :: CVar
     }
     
-runGenIR :: (forall s. GenIR s a) -> [Instruction Int]
+runGenIR :: (forall s. GenIR s ()) -> [Instruction Int]
 runGenIR x = runST (do
     end <- Label <$> newSTRef (-1)
     gs <- execStateT
@@ -94,6 +112,12 @@ resolveLabel (NilI v) = return $ NilI v
 resolveLabel (AssignI u v) = return $ AssignI u v
 resolveLabel (CallI r f vs vs') = return $ CallI r f vs vs'
 resolveLabel (CallVI r v vs vs') = return $ CallVI r v vs vs'
+resolveLabel (LoadAddressI u v) = return $ LoadAddressI u v
+resolveLabel (InRangeI u v low high) = return $ InRangeI u v low high
+resolveLabel (LoadFunI x f a) = return $ LoadFunI x f a
+
+compileToIR :: Exp CVar CFun -> [Instruction Int]
+compileToIR x = runGenIR (flip generateIR x =<< retVal)
 
 -- This linearises the expression, but does not put it into SSA form.
 generateIR :: CVar -> Exp CVar CFun -> GenIR s ()
@@ -104,6 +128,10 @@ generateIR output expr = case expr of
     StrE s -> write $ StringI output 
         (map (chr . fromIntegral) (Data.Array.Unboxed.elems s))
     RealE r -> write $ RealI output r
+    
+    FunE f arity -> do
+        x <- stackVar
+        write $ LoadFunI x f arity
     
     ReadE v -> write $ AssignI output v
     WriteE v e -> do
@@ -127,12 +155,22 @@ generateIR output expr = case expr of
         x' <- stackVar
         generateIR x' x
         end <- label
-        skip <- label
-        write $ ConditionalI x' skip
-        write $ AssignI x' output
+        success <- label
+        tryY <- label
+        
+        write $ ConditionalI x' tryY
+        write $ NilI output
         write $ JumpI end
-        defineLabel skip
-        generateIR output y
+        
+        defineLabel tryY
+        y' <- stackVar
+        generateIR y' y
+        write $ ConditionalI y' success
+        write $ NilI output
+        write $ JumpI end
+        
+        defineLabel success
+        write $ AssignI output y'
         defineLabel end
 
     OrE x y -> do
@@ -169,11 +207,17 @@ generateIR output expr = case expr of
         defineLabel endOfLoop 
         
     BreakE -> do
-        break <- gets gsBreakLabel
-        case break of 
+        breakLabel <- gets gsBreakLabel
+        case breakLabel of 
             -- TODO: add error handling to GenIR?
             Nothing -> error "\"út\" outside of loop"
             Just l -> write $ JumpI l
+            
+    ReturnE x -> do
+        r <- retVal
+        end <- gets gsReturnLabel
+        generateIR r x
+        write $ JumpI end
             
     IfE cond x y -> do
         cond' <- stackVar
@@ -197,16 +241,16 @@ generateIR output expr = case expr of
         
         -- Emit the code that selects the correct branch.
         ir <- stackVar
-        forM_ labels $ \(label, (ranges, body)) -> do
+        forM_ labels $ \(branchLabel, (ranges, _)) -> do
             forM_ ranges $ \(low, high) -> do
                 write $ InRangeI ir scrutinee' low high
-                write $ ConditionalI ir label
+                write $ ConditionalI ir branchLabel
         
         write $ JumpI defaultBranchLabel
         
         -- Now emit the IR for each branch.
-        forM labels $ \(label, (_ranges, body)) -> do
-            defineLabel label
+        forM_ labels $ \(branchLabel, (_, body)) -> do
+            defineLabel branchLabel
             generateIR output body
             write $ JumpI end
             
@@ -214,8 +258,6 @@ generateIR output expr = case expr of
         generateIR output defaultBranch
         
         defineLabel end
-        
-    _ -> return ()
     
     where
         evalRefArg :: Either (Exp CVar CFun) CVar -> GenIR s CVar
@@ -263,6 +305,7 @@ defineLabel (Label r) = do
     instrs <- GenIR $ gets gsInstructions
     GenIR . lift $ writeSTRef r (S.length instrs)
 
+infiniteLoop, branchTest :: GenIR s ()
 infiniteLoop = do
     x <- label
     defineLabel x
